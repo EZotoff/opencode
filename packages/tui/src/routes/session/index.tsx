@@ -44,6 +44,7 @@ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
+import open from "open"
 import { useDialog } from "../../ui/dialog"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { TodoItem } from "../../component/todo-item"
@@ -1686,10 +1687,126 @@ function ReasoningHeader(props: {
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  const renderer = useRenderer()
   return (
     <Show when={props.part.text.trim()}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box
+        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+        paddingLeft={3}
+        marginTop={1}
+        flexShrink={0}
+        onMouseUp={(e: any) => {
+          // Fallback for regular clicks (Ctrl+Click is handled by OSC 8).
+          // If the cell has a linkId, resolve and open it. Otherwise try
+          // text-based matching against [label](url) patterns.
+          try {
+            const sel = renderer.getSelection()?.getSelectedText()
+            if (sel) return
+            const buf = renderer.currentRenderBuffer
+            const idx = e.y * buf.width + e.x
+            if (idx < 0 || idx >= buf.buffers.attributes.length) return
+            const lid = (buf.buffers.attributes[idx] >>> 8) & 0xffffff
+            if (lid > 0) {
+              const url = (renderer as any).lib?.linkGetUrl?.(lid)
+              if (typeof url === "string" && url.length > 0) { open(url).catch(() => {}); return }
+            }
+            const content = props.part.text.trim()
+            const linkRe = /\[([^\]]+)\]\(([^)\s]+)\)/g
+            const links: { label: string; url: string }[] = []
+            let m: RegExpExecArray | null
+            while ((m = linkRe.exec(content)) !== null) links.push({ label: m[1], url: m[2] })
+            if (links.length === 0) return
+            let lineText = ""
+            for (let x = 0; x < buf.width; x++) {
+              const c = buf.buffers.char[e.y * buf.width + x]
+              lineText += c ? String.fromCodePoint(c) : " "
+            }
+            lineText = lineText.trim()
+            if (!lineText) return
+            let best: { url: string; overlap: number } | null = null
+            for (const link of links) {
+              const overlap = lineText.length <= link.label.length
+                ? (link.label.includes(lineText) ? lineText.length : 0)
+                : (lineText.includes(link.label) ? link.label.length : 0)
+              if (overlap >= 3 && (!best || overlap > best.overlap)) best = { url: link.url, overlap }
+            }
+            if (best) open(best.url).catch(() => {})
+          } catch {}
+        }}
+      >
         <markdown
+          ref={(el: any) => {
+            // Patch _linkifyMarkdownChunks to: (1) tag label chunks with .link so labels are
+            // clickable after tree-sitter replaces initial streaming chunks, and
+            // (2) when conceal is ON, filter out the URL and syntax chunks from
+            // [label](url) markdown links so only the label text renders — this
+            // fixes the conceal bug where (file:///...) URLs remain visible, wrap
+            // across lines, and produce truncated OSC 8 hyperlinks.
+            if (el && !el.__linkLabelPatch) {
+              el.__linkLabelPatch = true
+              // The markdown renderable exposes _linkifyMarkdownChunks (not _onChunks)
+              const orig = el._linkifyMarkdownChunks
+              if (typeof orig === "function") {
+                el._linkifyMarkdownChunks = (chunks: any[], context: any) => {
+                  const result = orig.call(el, chunks, context)
+                  try {
+                    const content = context?.content ?? ""
+                    const linkRe = /\[([^\]]+)\]\(([^)\s]+)\)/g
+                    // Build link ranges: label region and URL/syntax region
+                    const links: { labelStart: number; labelEnd: number; urlEnd: number; url: string }[] = []
+                    let lm: RegExpExecArray | null
+                    while ((lm = linkRe.exec(content)) !== null) {
+                      const labelStart = lm.index + 1
+                      const labelEnd = labelStart + lm[1].length
+                      const urlEnd = lm.index + lm[0].lastIndexOf("(") + 1 + lm[2].length
+                      links.push({ labelStart, labelEnd, urlEnd, url: lm[2] })
+                    }
+                    if (links.length === 0) return result
+
+                    const conceal = ctx.conceal()
+                    const filtered: any[] = []
+                    let pos = 0
+                    for (const chunk of result) {
+                      if (!chunk.text || chunk.text.length === 0) { filtered.push(chunk); continue }
+                      const cs = content.indexOf(chunk.text, pos)
+                      if (cs < 0) { filtered.push(chunk); pos += chunk.text.length; continue }
+                      const ce = cs + chunk.text.length
+                      pos = ce
+
+                      let isLabel = false
+                      let isUrlOrSyntax = false
+                      let linkUrl: string | null = null
+                      for (const lk of links) {
+                        if (cs < lk.labelEnd && ce > lk.labelStart) {
+                          isLabel = true;
+                          linkUrl = lk.url
+                        }
+                        // URL/syntax region: from after label to closing ')'
+                        if (cs >= lk.labelEnd && ce <= lk.urlEnd + 1) {
+                          isUrlOrSyntax = true;
+                          linkUrl = lk.url
+                        }
+                      }
+
+                      // Tag label chunks with .link so they're clickable
+                      if (isLabel && linkUrl && !chunk.link) {
+                        chunk.link = { url: linkUrl }
+                      }
+
+                      // When conceal is ON, hide URL and syntax chunks
+                      if (conceal && isUrlOrSyntax) {
+                        continue // skip this chunk — don't render URL text
+                      }
+
+                      filtered.push(chunk)
+                    }
+                    return filtered
+                  } catch {}
+                  return result
+                }
+              }
+            }
+          }}
           syntaxStyle={syntax()}
           streaming={true}
           internalBlockMode="top-level"
