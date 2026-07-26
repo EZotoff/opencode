@@ -104,7 +104,7 @@ export interface Interface {
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
-  readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts | undefined, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
 }
 
@@ -1457,11 +1457,15 @@ const layer = Layer.effect(
           : yield* currentModel(input.sessionID)
         : taskModel
 
+      const commandOutput = { parts, cancelled: false }
       yield* plugin.trigger(
         "command.execute.before",
         { command: input.command, sessionID: input.sessionID, arguments: input.arguments },
-        { parts },
+        commandOutput,
       )
+      if (commandOutput.cancelled) {
+        return undefined
+      }
 
       const result = yield* prompt({
         sessionID: input.sessionID,
