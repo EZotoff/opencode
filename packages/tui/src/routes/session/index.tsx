@@ -1736,76 +1736,98 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
       >
         <markdown
           ref={(el: any) => {
-            // Patch _linkifyMarkdownChunks to: (1) tag label chunks with .link so labels are
-            // clickable after tree-sitter replaces initial streaming chunks, and
-            // (2) when conceal is ON, filter out the URL and syntax chunks from
-            // [label](url) markdown links so only the label text renders — this
-            // fixes the conceal bug where (file:///...) URLs remain visible, wrap
-            // across lines, and produce truncated OSC 8 hyperlinks.
-            if (el && !el.__linkLabelPatch) {
-              el.__linkLabelPatch = true
-              // The markdown renderable exposes _linkifyMarkdownChunks (not _onChunks)
-              const orig = el._linkifyMarkdownChunks
-              if (typeof orig === "function") {
-                el._linkifyMarkdownChunks = (chunks: any[], context: any) => {
-                  const result = orig.call(el, chunks, context)
-                  try {
-                    const content = context?.content ?? ""
-                    const linkRe = /\[([^\]]+)\]\(([^)\s]+)\)/g
-                    // Build link ranges: label region and URL/syntax region
-                    const links: { labelStart: number; labelEnd: number; urlEnd: number; url: string }[] = []
-                    let lm: RegExpExecArray | null
-                    while ((lm = linkRe.exec(content)) !== null) {
-                      const labelStart = lm.index + 1
-                      const labelEnd = labelStart + lm[1].length
-                      const urlEnd = lm.index + lm[0].lastIndexOf("(") + 1 + lm[2].length
-                      links.push({ labelStart, labelEnd, urlEnd, url: lm[2] })
-                    }
-                    if (links.length === 0) return result
+            if (!el || el.__linkLabelPatch) return
+            el.__linkLabelPatch = true
 
-                    const conceal = ctx.conceal()
-                    const filtered: any[] = []
-                    let pos = 0
-                    for (const chunk of result) {
-                      if (!chunk.text || chunk.text.length === 0) { filtered.push(chunk); continue }
-                      const cs = content.indexOf(chunk.text, pos)
-                      if (cs < 0) { filtered.push(chunk); pos += chunk.text.length; continue }
-                      const ce = cs + chunk.text.length
-                      pos = ce
-
-                      let isLabel = false
-                      let isUrlOrSyntax = false
-                      let linkUrl: string | null = null
-                      for (const lk of links) {
-                        if (cs < lk.labelEnd && ce > lk.labelStart) {
-                          isLabel = true;
-                          linkUrl = lk.url
-                        }
-                        // URL/syntax region: from after label to closing ')'
-                        if (cs >= lk.labelEnd && ce <= lk.urlEnd + 1) {
-                          isUrlOrSyntax = true;
-                          linkUrl = lk.url
-                        }
-                      }
-
-                      // Tag label chunks with .link so they're clickable
-                      if (isLabel && linkUrl && !chunk.link) {
-                        chunk.link = { url: linkUrl }
-                      }
-
-                      // When conceal is ON, hide URL and syntax chunks
-                      if (conceal && isUrlOrSyntax) {
-                        continue // skip this chunk — don't render URL text
-                      }
-
-                      filtered.push(chunk)
-                    }
-                    return filtered
-                  } catch {}
-                  return result
+            const patchChunks = (chunks: any[], context: any) => {
+              const result = chunks
+              try {
+                const content = context?.content ?? ""
+                const linkRe = /\[([^\]]+)\]\(([^)\s]+)\)/g
+                // Build link ranges: label region and URL/syntax region
+                const links: { labelStart: number; labelEnd: number; urlEnd: number; url: string }[] = []
+                let lm: RegExpExecArray | null
+                while ((lm = linkRe.exec(content)) !== null) {
+                  const labelStart = lm.index + 1
+                  const labelEnd = labelStart + lm[1].length
+                  const urlEnd = lm.index + lm[0].lastIndexOf("(") + 1 + lm[2].length
+                  links.push({ labelStart, labelEnd, urlEnd, url: lm[2] })
                 }
+                if (links.length === 0) return result
+
+                const conceal = ctx.conceal()
+                const filtered: any[] = []
+                let pos = 0
+                for (const chunk of result) {
+                  if (!chunk.text || chunk.text.length === 0) { filtered.push(chunk); continue }
+                  const cs = content.indexOf(chunk.text, pos)
+                  if (cs < 0) { filtered.push(chunk); pos += chunk.text.length; continue }
+                  const ce = cs + chunk.text.length
+                  pos = ce
+
+                  let isLabel = false
+                  let isUrlOrSyntax = false
+                  let linkUrl: string | null = null
+                  for (const lk of links) {
+                    if (cs < lk.labelEnd && ce > lk.labelStart) {
+                      isLabel = true;
+                      linkUrl = lk.url
+                    }
+                    // URL/syntax region: from after label to closing ')'
+                    if (cs >= lk.labelEnd && ce <= lk.urlEnd + 1) {
+                      isUrlOrSyntax = true;
+                      linkUrl = lk.url
+                    }
+                  }
+
+                  // Tag label chunks with .link so they're clickable
+                  if (isLabel && linkUrl && !chunk.link) {
+                    chunk.link = { url: linkUrl }
+                  }
+
+                  // When conceal is ON, hide URL and syntax chunks
+                  if (conceal && isUrlOrSyntax) {
+                    continue // skip this chunk — don't render URL text
+                  }
+
+                  filtered.push(chunk)
+                }
+                return filtered
+              } catch {}
+              return result
+            }
+
+            const wrapOnChunks = (origOnChunks: any) => async (chunks: any[], context: any) => {
+              const result = typeof origOnChunks === "function"
+                ? await origOnChunks(chunks, context)
+                : chunks
+              return patchChunks(result || chunks, context)
+            }
+
+            const origCreate = el.createMarkdownCodeRenderable
+            if (typeof origCreate === "function") {
+              el.createMarkdownCodeRenderable = function(...args: any[]) {
+                // args[3] is onChunks (defaults to this._linkifyMarkdownChunks in OpenTUI 0.4.5)
+                const origOnChunks = args[3] || el._linkifyMarkdownChunks
+                args[3] = wrapOnChunks(origOnChunks)
+                const child = origCreate.apply(this, args)
+                if (child) child.__linkPatched = true
+                return child
               }
             }
+
+            const walkChildren = (renderable: any) => {
+              const children = renderable.getChildren?.() ?? []
+              for (const child of children) {
+                if ((child.constructor?.name === "CodeRenderable" || child.filetype === "markdown")
+                    && typeof child.onChunks === "function" && !child.__linkPatched) {
+                  child.__linkPatched = true
+                  child.onChunks = wrapOnChunks(child.onChunks)
+                }
+                walkChildren(child)
+              }
+            }
+            walkChildren(el)
           }}
           syntaxStyle={syntax()}
           streaming={true}
