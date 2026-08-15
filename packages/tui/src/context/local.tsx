@@ -437,11 +437,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         .then((x) => {
           if (!x || typeof x !== "object") return
           const pinned = (x as Record<string, unknown>).pinned
-          if (Array.isArray(pinned))
-            setSessionStore(
-              "pinned",
-              pinned.filter((item): item is string => typeof item === "string"),
-            )
+          if (!Array.isArray(pinned)) return
+          const fromFile = pinned.filter((item): item is string => typeof item === "string")
+          if (state.pending) {
+            // opencode--tui-pinned-session-race: a pin mutation happened before the initial
+            // read resolved. Merge instead of overwriting, or the deferred save() below
+            // persists the stale file content and wipes the fresh pin.
+            const merged = [...sessionStore.pinned]
+            for (const id of fromFile) if (!merged.includes(id)) merged.push(id)
+            setSessionStore("pinned", merged)
+          } else {
+            setSessionStore("pinned", fromFile)
+          }
         })
         .catch(() => {})
         .finally(() => {
@@ -454,20 +461,41 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return sessionStore.pinned.filter((id) => existing.has(id)).slice(0, 9)
       })
 
-      function prune(sessionID: string) {
-        batch(() => {
-          if (sessionStore.pinned.includes(sessionID)) {
+      // opencode--tui-pinned-session-race: prune must NOT write this process's in-memory
+      // snapshot. Long-running TUI processes receive session.deleted for sessions removed
+      // anywhere in the same project; saving startup-era memory here overwrites pins added
+      // by other processes since this TUI started (observed wiping newer pins for hours).
+      // Instead: read the file's CURRENT content, remove only the deleted id, write that.
+      async function prune(sessionID: string) {
+        if (sessionStore.pinned.includes(sessionID)) {
+          batch(() => {
             setSessionStore(
               "pinned",
               sessionStore.pinned.filter((x) => x !== sessionID),
             )
+          })
+        }
+        let onDisk: string[] = []
+        try {
+          const x = await readJson<unknown>(filePath)
+          if (x && typeof x === "object" && Array.isArray((x as Record<string, unknown>).pinned)) {
+            onDisk = ((x as Record<string, unknown>).pinned as unknown[]).filter(
+              (item): item is string => typeof item === "string",
+            )
+          } else {
+            return
           }
-          save()
-        })
+        } catch {
+          // File unreadable or missing — nothing safe to rewrite; in-memory update above
+          // still keeps this TUI's view consistent.
+          return
+        }
+        if (!onDisk.includes(sessionID)) return
+        await writeJsonAtomic(filePath, { pinned: onDisk.filter((id) => id !== sessionID) })
       }
 
       event.on("session.deleted", (evt) => {
-        prune(evt.properties.info.id)
+        void prune(evt.properties.info.id)
       })
 
       return {
