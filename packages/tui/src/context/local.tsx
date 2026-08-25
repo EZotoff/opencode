@@ -509,16 +509,36 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         isPinned(sessionID: string) {
           return sessionStore.pinned.includes(sessionID)
         },
-        togglePin(sessionID: string) {
-          batch(() => {
-            const exists = sessionStore.pinned.includes(sessionID)
-            const next = exists
-              ? sessionStore.pinned.filter((x) => x !== sessionID)
-              : [...sessionStore.pinned, sessionID]
-            setSessionStore("pinned", next)
-            save()
-          })
-        },
+      async togglePin(sessionID: string) {
+        const exists = sessionStore.pinned.includes(sessionID)
+        let next = exists
+          ? sessionStore.pinned.filter((x) => x !== sessionID)
+          : [...sessionStore.pinned, sessionID]
+        batch(() => setSessionStore("pinned", next))
+        // opencode--tui-pinned-session-race v2: togglePin must NOT write this process's whole
+        // in-memory array via save(). A TUI started before a pin was added elsewhere holds a
+        // stale array; its next toggle would rewrite that stale array to disk and wipe the
+        // newer pin (observed 2026-08-25 19:35:44: PID 18794 wrote a stale 37-pin array plus
+        // its own toggle, erasing the pin added 17:55 by PID 18464 — pin-watch.log). Instead:
+        // read-modify-write the file, mutating only the toggled id.
+        try {
+          const x = await readJson<unknown>(filePath)
+          if (x && typeof x === "object" && Array.isArray((x as Record<string, unknown>).pinned)) {
+            const onDisk = ((x as Record<string, unknown>).pinned as unknown[]).filter(
+              (item): item is string => typeof item === "string",
+            )
+            const disk = new Set(onDisk)
+            if (exists) disk.delete(sessionID)
+            else disk.add(sessionID)
+            next = [...disk]
+          }
+        } catch {
+          // File unreadable or missing — fall back to the in-memory projection so the
+          // user's toggle is not silently dropped.
+        }
+        await writeJsonAtomic(filePath, { pinned: next })
+        batch(() => setSessionStore("pinned", next))
+      },
         quickSwitch(slot: number) {
           const target = slots()[slot - 1]
           if (!target) return
