@@ -29,7 +29,6 @@ import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
-import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 
@@ -158,13 +157,15 @@ export const {
     }
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
+      // opencode--tui-session-directory-scope: on a shared daemon (multiple `opencode attach`
+      // TUIs on one `opencode serve`), scope the session list to this TUI's exact directory.
+      // The SDK sends x-opencode-directory on every request; with neither `scope` nor `path`
+      // in the query, the server filters sessions to SessionTable.directory == the routed
+      // instance directory. The previous path-subtree query degraded to project-wide for
+      // repo roots (relative path "") and lumped every non-git directory into the shared
+      // "global" project bucket, surfacing other directories' sessions in this list.
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
-      if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
-      return {
-        path: path
-          .relative(path.resolve(project.data.instance.path.worktree), project.data.instance.path.directory)
-          .replaceAll("\\", "/"),
-      }
+      return {}
     }
 
     function listSessions() {
@@ -286,6 +287,21 @@ export const {
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore("session", result.index, reconcile(event.properties.info))
+            break
+          }
+          // opencode--tui-session-directory-scope: the daemon's global /event stream is
+          // unfiltered (server global.ts re-broadcasts every directory's events to every
+          // connected TUI). Without this guard, a session.updated from ANY directory on the
+          // shared daemon — other `oa` terminals, /tmp scratch dirs on the global project —
+          // is inserted into this TUI's session store and surfaces in the session list,
+          // quick-switch slots, and the dialog fallback. Only allow INSERTs originating from
+          // this TUI's own directory; updates to already-known sessions always apply.
+          if (
+            kv.get("session_directory_filter_enabled", true) &&
+            sdk.directory &&
+            directory !== undefined &&
+            directory !== sdk.directory
+          ) {
             break
           }
           setStore(
