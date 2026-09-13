@@ -2,7 +2,7 @@ import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
-import { createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { Locale } from "../util/locale"
 import { useProject } from "../context/project"
@@ -75,6 +75,34 @@ export function DialogSessionList() {
     },
   )
 
+  // opencode--tui-pinned-session-window: the Pinned section only showed pins that also
+  // fit the newest-100 browse window (or the 30-day/100 sync window), so a busy project
+  // — or a session-spam flood — silently hid pinned sessions. Fetch pinned sessions
+  // directly by ID so the Pinned section is independent of the list windows.
+  async function fetchSession(id: string) {
+    const res = await sdk.client.session.get({ sessionID: id })
+    return res.data
+  }
+  const [fetchedPinned, setFetchedPinned] = createSignal<Record<string, Awaited<ReturnType<typeof fetchSession>>>>({})
+  const pinnedFetches = new Set<string>()
+  createEffect(
+    on(
+      () => [local.session.pinned(), searchResults(), browseResults(), sync.data.session] as const,
+      ([pinnedIDs, search, browse, syncedSessions]) => {
+        const known = new Set((search ?? browse ?? syncedSessions).map((x) => x.id))
+        for (const id of pinnedIDs) {
+          if (known.has(id) || pinnedFetches.has(id)) continue
+          pinnedFetches.add(id)
+          void fetchSession(id)
+            .then((session) => {
+              if (session) setFetchedPinned((prev) => ({ ...prev, [id]: session }))
+            })
+            .catch(() => {})
+        }
+      },
+    ),
+  )
+
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
   const sessions = createMemo(() => {
     const result = searchResults() ?? browseResults() ?? sync.data.session
@@ -82,7 +110,7 @@ export function DialogSessionList() {
     const ids = new Set(result.map((session) => session.id))
     const extra = [currentSessionID(), ...local.session.pinned()].flatMap((id) => {
       if (!id || ids.has(id)) return []
-      const session = synced.get(id)
+      const session = synced.get(id) ?? fetchedPinned()[id]
       if (session) ids.add(id)
       return session ? [session] : []
     })
