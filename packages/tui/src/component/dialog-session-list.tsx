@@ -8,6 +8,7 @@ import { Locale } from "../util/locale"
 import { useProject } from "../context/project"
 import { useTheme } from "../context/theme"
 import { useSDK } from "../context/sdk"
+import { useKV } from "../context/kv"
 import { useLocal } from "../context/local"
 import { DialogSessionRename } from "./dialog-session-rename"
 import { createDebouncedSignal } from "../util/signal"
@@ -52,6 +53,7 @@ export function DialogSessionList() {
   const event = useEvent()
   const local = useLocal()
   const toast = useToast()
+  const kv = useKV()
   const [toDelete, setToDelete] = createSignal<string>()
   const [deleted, setDeleted] = createSignal(new Set<string>())
   const [search, setSearch] = createDebouncedSignal("", 150)
@@ -104,6 +106,13 @@ export function DialogSessionList() {
   )
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
+  // opencode--tui-pin-directory-guard: session.get() by ID is not directory-scoped
+  // server-side, so fetchedPinned can materialize sessions from other directories
+  // into this dialog. While the directory filter is on (default), drop
+  // foreign-directory pins here — they stay fully visible in the TUI attached to
+  // their own directory (opencode--tui-session-directory-scope invariant).
+  const foreignPin = (session: { directory: string }, id: string) =>
+    id !== currentSessionID() && kv.get("session_directory_filter_enabled", true) && !!sdk.directory && session.directory !== sdk.directory
   const sessions = createMemo(() => {
     const result = searchResults() ?? browseResults() ?? sync.data.session
     const synced = new Map(sync.data.session.map((session) => [session.id, session]))
@@ -111,8 +120,10 @@ export function DialogSessionList() {
     const extra = [currentSessionID(), ...local.session.pinned()].flatMap((id) => {
       if (!id || ids.has(id)) return []
       const session = synced.get(id) ?? fetchedPinned()[id]
-      if (session) ids.add(id)
-      return session ? [session] : []
+      if (!session) return []
+      if (foreignPin(session, id)) return []
+      ids.add(id)
+      return [session]
     })
     const query = search().trim().toLowerCase()
     return [...result.map((session) => synced.get(session.id) ?? session), ...extra]
