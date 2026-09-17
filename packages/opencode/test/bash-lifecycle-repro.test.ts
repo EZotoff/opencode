@@ -9,7 +9,9 @@
 // is expected to pass today (contained group kill already works); (b) and (c) are
 // expected to fail until the supervised-lifecycle patch lands.
 import { describe, expect } from "bun:test"
+import { spawn } from "node:child_process"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { ProcessGroup } from "@opencode-ai/core/process-group"
 import { Effect, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import fs from "fs/promises"
@@ -28,6 +30,7 @@ import { testEffect } from "./lib/effect"
 import { Tool } from "@/tool/tool"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceStore } from "@/project/instance-store"
+import { ShellLifecycle } from "@/tool/shell/lifecycle"
 
 const shellLayer = Layer.mergeAll(
   LayerNode.compile(
@@ -104,6 +107,17 @@ const readPid = async (file: string) => {
 
 const scratch = () => fs.mkdtemp(path.join(os.tmpdir(), "bash-lifecycle-repro-"))
 
+const gone = async (pid: number) => {
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return
+    await Bun.sleep(25)
+  }
+  throw new Error(`pid ${pid} still alive`)
+}
+
+const fdCount = async () => (await fs.readdir(`/proc/${process.pid}/fd`)).length
+
 describe("bash lifecycle repro (baseline)", () => {
   it.live(
     "(a) timeout kills contained background members",
@@ -127,6 +141,115 @@ describe("bash lifecycle repro (baseline)", () => {
         }),
       ),
     20_000,
+  )
+
+  it.live(
+    "registers before visibility and emits redacted lifecycle telemetry",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          ShellLifecycle.testing.reset()
+          const order: string[] = []
+          const events: ShellLifecycle.Event[] = []
+          ShellLifecycle.testing.setHooks({
+            registered: () => order.push("registered"),
+            visible: () => order.push("visible"),
+            event: (event) => events.push(event),
+          })
+          const canary = "TASK5_SECRET_CANARY"
+          yield* run({ command: `printf ${canary}`, timeout: 2000 }, { ...ctx, callID: "inv_redaction" })
+          expect(order.slice(0, 2)).toEqual(["registered", "visible"])
+          expect(events).toHaveLength(1)
+          expect(JSON.stringify(events)).not.toContain(canary)
+          expect(events[0]).toMatchObject({
+            invocationID: "inv_redaction",
+            reason: "exit",
+            containment: "contained",
+            term: null,
+            kill: null,
+            forcedPipeClose: false,
+            drainTruncated: false,
+          })
+          expect(events[0]?.cleanupMs).toBeNumber()
+          ShellLifecycle.testing.reset()
+        }),
+      ),
+    20_000,
+  )
+
+  it.live(
+    "orderly shutdown cleans this server instance only",
+    () =>
+      Effect.gen(function* () {
+        if (!posix) return
+        ShellLifecycle.testing.reset()
+        const own = spawn("bash", ["-c", "sleep 30"], { detached: true, stdio: "ignore" })
+        const foreign = spawn("bash", ["-c", "sleep 30"], { detached: true, stdio: "ignore" })
+        const directory = yield* Effect.promise(scratch)
+        try {
+          const ownGroup = ProcessGroup.arm(own.pid ?? 0)
+          const foreignGroup = ProcessGroup.arm(foreign.pid ?? 0)
+          ShellLifecycle.register({ invocationID: "own", directory, group: ownGroup })
+          ShellLifecycle.testing.insert({
+            instanceID: "foreign-server-instance",
+            invocationID: "foreign",
+            directory,
+            group: foreignGroup,
+          })
+          yield* Effect.promise(() => ShellLifecycle.cleanup(directory))
+          yield* Effect.promise(() => gone(own.pid ?? 0))
+          expect(alive(foreign.pid ?? 0)).toBe(true)
+          expect(ShellLifecycle.testing.entries().map((entry) => entry.invocationID)).toEqual(["foreign"])
+        } finally {
+          killPid(own.pid ?? 0)
+          killPid(foreign.pid ?? 0)
+          ShellLifecycle.testing.reset()
+        }
+      }),
+    20_000,
+  )
+
+  it.live(
+    "fork burst remains bounded across sequential invocations",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          if (!posix) return
+          ShellLifecycle.testing.reset()
+          const events: ShellLifecycle.Event[] = []
+          ShellLifecycle.testing.setHooks({ event: (event) => events.push(event) })
+          const baseline = yield* Effect.promise(fdCount)
+          const latencies: number[] = []
+          const followups: number[] = []
+          for (let invocation = 0; invocation < 5; invocation++) {
+            const start = Date.now()
+            yield* run(
+              { command: `for i in {1..20}; do true & done; sleep 1 & wait`, timeout: 3000 },
+              { ...ctx, callID: `inv_burst_${invocation}` },
+            )
+            latencies.push(Date.now() - start)
+            const followupStart = Date.now()
+            const followup = yield* run(
+              { command: "printf ok", timeout: 2000 },
+              { ...ctx, callID: `inv_followup_${invocation}` },
+            )
+            followups.push(Date.now() - followupStart)
+            expect(followup.output).toBe("ok")
+          }
+          const final = yield* Effect.promise(fdCount)
+          console.log("fork-burst-evidence", JSON.stringify({ baseline, final, delta: final - baseline, latencies, followups }))
+          expect(latencies.every((latency) => latency < 3000)).toBe(true)
+          expect(followups.every((latency) => latency < 500)).toBe(true)
+          expect(final - baseline).toBeLessThanOrEqual(5)
+          for (let invocation = 0; invocation < 5; invocation++) {
+            expect(events.filter((event) => event.invocationID === `inv_burst_${invocation}`).length).toBeLessThanOrEqual(10)
+          }
+          ShellLifecycle.testing.reset()
+        }),
+      ),
+    30_000,
   )
 
   it.live(
