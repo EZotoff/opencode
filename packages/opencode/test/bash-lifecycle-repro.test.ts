@@ -180,6 +180,125 @@ describe("bash lifecycle repro (baseline)", () => {
     20_000,
   )
 
+  it.live(
+    "(d) SIGTERM-ignoring descendant is KILLed after grace",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const dir = yield* Effect.promise(scratch)
+          const pidFile = path.join(dir, "pid")
+          const start = Date.now()
+          const result = yield* run({
+            // trap '' TERM survives the exec: the sleep ignores SIGTERM
+            command: `bash -c 'trap "" TERM; echo $BASHPID > ${pidFile}; exec sleep 30' & wait`,
+            timeout: 1000,
+          })
+          const elapsed = Date.now() - start
+          const pid = yield* Effect.promise(() => readPid(pidFile))
+          expect(pid).toBeGreaterThan(0)
+          expect(alive(pid)).toBe(false)
+          // TERM (3s grace) then KILL, bounded
+          expect(elapsed).toBeLessThan(8000)
+          expect(result.output).toContain("exceeding timeout")
+          expect(result.metadata.lifecycle.reason).toBe("timeout")
+          expect(result.metadata.lifecycle.term).toBe("live-target")
+          expect(result.metadata.lifecycle.kill).toBe("live-target")
+        }),
+      ),
+    20_000,
+  )
+
+  it.live(
+    "(e) setsid escape: group cleaned, escape observable",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const dir = yield* Effect.promise(scratch)
+          const pidFile = path.join(dir, "pid")
+          const start = Date.now()
+          const result = yield* run({
+            command: `setsid sh -c 'echo $$ > ${pidFile}; exec sleep 30' & echo started; sleep 30`,
+            timeout: 1000,
+          })
+          const elapsed = Date.now() - start
+          const pid = yield* Effect.promise(() => readPid(pidFile))
+          // escaped child is outside the owned group: it survives (never swept)
+          const escaped = alive(pid)
+          killPid(pid)
+          expect(escaped).toBe(true)
+          expect(elapsed).toBeLessThan(6000)
+          expect(result.output).toContain("started")
+          expect(result.output).toContain("exceeding timeout")
+          // the escaped child holds the inherited pipe -> escape is observed
+          expect(result.metadata.lifecycle.containment).toBe("escaped-observed")
+          expect(result.metadata.lifecycle.reason).toBe("timeout")
+        }),
+      ),
+    20_000,
+  )
+
+  it.live(
+    "(f) concurrent timeout+abort race: exactly one cleanup, no post-disarm signal",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const dir = yield* Effect.promise(scratch)
+          const pidFile = path.join(dir, "pid")
+          const ctl = new AbortController()
+          const start = Date.now()
+          // fire the abort at the same wall-clock moment as the timeout
+          setTimeout(() => ctl.abort(), 1000)
+          const exit = yield* run(
+            {
+              command: `sleep 30 & echo $! > ${pidFile}; wait`,
+              timeout: 1000,
+            },
+            { ...ctx, abort: ctl.signal },
+          ).pipe(Effect.exit)
+          const elapsed = Date.now() - start
+          const pid = yield* Effect.promise(() => readPid(pidFile))
+          killPid(pid)
+          expect(exit._tag).toBe("Success")
+          expect(alive(pid)).toBe(false)
+          expect(elapsed).toBeLessThan(6000)
+          if (exit._tag === "Success") {
+            const reason = exit.value.metadata.lifecycle.reason
+            expect(["timeout", "abort"]).toContain(reason)
+          }
+        }),
+      ),
+    20_000,
+  )
+
+  it.live(
+    "(g) leader exits while contained child holds stdout: bounded return",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const dir = yield* Effect.promise(scratch)
+          const pidFile = path.join(dir, "pid")
+          const start = Date.now()
+          const result = yield* run({
+            command: `sleep 20 & echo $! > ${pidFile}; echo done`,
+            timeout: 1000,
+          })
+          const elapsed = Date.now() - start
+          const pid = yield* Effect.promise(() => readPid(pidFile))
+          expect(alive(pid)).toBe(false)
+          // non-empty group at the deadline becomes a timeout -> full cleanup
+          expect(elapsed).toBeLessThan(6000)
+          expect(result.output).toContain("done")
+          expect(result.output).toContain("exceeding timeout")
+          expect(result.metadata.lifecycle.containment).toBe("contained")
+        }),
+      ),
+    20_000,
+  )
+
   if (!posix) {
     it.live("(b)/(c) skipped on win32", () => Effect.void)
   }

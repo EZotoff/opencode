@@ -2,6 +2,7 @@ import type * as Arr from "effect/Array"
 import { NodeFileSystem, NodeSink, NodeStream } from "@effect/platform-node"
 import * as NodePath from "@effect/platform-node/NodePath"
 import * as Deferred from "effect/Deferred"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as FileSystem from "effect/FileSystem"
@@ -26,6 +27,15 @@ import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
 import { makeGlobalNode } from "./effect/app-node"
 import { filesystem, path } from "./effect/app-node-platform"
+import { ProcessGroup } from "./process-group"
+
+/**
+ * Verified process-group state per spawned child (POSIX only). Arming verifies
+ * leader identity via /proc/<pid>/stat field 5 (pgrp === pid); when identity
+ * cannot be verified the entry stays unarmed and all group signaling degrades
+ * to single-pid kills. See process-group.ts for the contract.
+ */
+const groups = new WeakMap<NodeChildProcess.ChildProcess, ProcessGroup.Group>()
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -268,6 +278,7 @@ export const make = Effect.gen(function* () {
     Effect.callback<readonly [NodeChildProcess.ChildProcess, ExitSignal], PlatformError.PlatformError>((resume) => {
       const signal = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
       const proc = launch(command.command, command.args, opts)
+      if (Predicate.isNotUndefined(proc.pid)) groups.set(proc, ProcessGroup.arm(proc.pid))
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
       proc.on("error", (err) => {
@@ -293,23 +304,13 @@ export const make = Effect.gen(function* () {
     command: ChildProcess.StandardCommand,
     proc: NodeChildProcess.ChildProcess,
     signal: NodeJS.Signals,
-  ) => {
-    if (globalThis.process.platform === "win32") {
-      return Effect.callback<void, PlatformError.PlatformError>((resume) => {
-        NodeChildProcess.exec(`taskkill /pid ${proc.pid} /T /F`, { windowsHide: true }, (err) => {
-          if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
-          resume(Effect.void)
-        })
+  ) =>
+    Effect.callback<void, PlatformError.PlatformError>((resume) => {
+      NodeChildProcess.exec(`taskkill /pid ${proc.pid} /T /F`, { windowsHide: true }, (err) => {
+        if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
+        resume(Effect.void)
       })
-    }
-
-    return Effect.try({
-      try: () => {
-        globalThis.process.kill(-proc.pid!, signal)
-      },
-      catch: (err) => toPlatformError("kill", toError(err), command),
     })
-  }
 
   const killOne = (
     command: ChildProcess.StandardCommand,
@@ -321,26 +322,94 @@ export const make = Effect.gen(function* () {
       return Effect.fail(toPlatformError("kill", new Error("Failed to kill child process"), command))
     })
 
-  const timeout =
-    (
-      proc: NodeChildProcess.ChildProcess,
-      command: ChildProcess.StandardCommand,
-      opts: ChildProcess.KillOptions | undefined,
-    ) =>
-    <A, E, R>(
-      f: (
-        command: ChildProcess.StandardCommand,
-        proc: NodeChildProcess.ChildProcess,
-        signal: NodeJS.Signals,
-      ) => Effect.Effect<A, E, R>,
-    ) => {
-      const signal = opts?.killSignal ?? "SIGTERM"
-      if (Predicate.isUndefined(opts?.forceKillAfter)) return f(command, proc, signal)
-      return Effect.timeoutOrElse(f(command, proc, signal), {
-        duration: opts.forceKillAfter,
-        orElse: () => f(command, proc, "SIGKILL"),
-      })
+  /**
+   * Gated signal dispatch. POSIX group signals go through ProcessGroup.signal,
+   * which only issues kill(-pgid) while the leader is verified alive or the
+   * immediately preceding member enumeration found members, and disarms the
+   * pgid permanently once the group is observed empty. An unverified identity
+   * degrades to a single-pid kill; a numeric pgid is never signaled ungated.
+   * Returns true when a signal was actually sent to a live target.
+   */
+  const send = (
+    command: ChildProcess.StandardCommand,
+    proc: NodeChildProcess.ChildProcess,
+    signal: NodeJS.Signals,
+  ): Effect.Effect<boolean, PlatformError.PlatformError> => {
+    if (globalThis.process.platform === "win32") {
+      return Effect.catch(Effect.as(killGroup(command, proc, signal), true), () =>
+        Effect.as(killOne(command, proc, signal), true),
+      )
     }
+    return Effect.suspend(() => {
+      const group = groups.get(proc)
+      const result = group ? ProcessGroup.signal(group, signal) : ({ tag: "unverified" } as const)
+      switch (result.tag) {
+        case "live-target":
+          return Effect.succeed(true)
+        // ESRCH / disarmed / identity-mismatch: nothing (safe) to signal; the
+        // group is gone or the pid no longer names it
+        case "esrch":
+        case "disarmed":
+        case "identity-mismatch":
+          return Effect.succeed(false)
+        case "unverified":
+          return Effect.catch(Effect.as(killOne(command, proc, signal), true), () => Effect.succeed(false))
+        case "error":
+          return Effect.fail(toPlatformError("kill", toError(result.error), command))
+      }
+    })
+  }
+
+  const awaitClosed = (signal: ExitSignal, duration: Duration.Input) =>
+    Effect.timeoutOrElse(Deferred.await(signal).pipe(Effect.asVoid), {
+      duration,
+      orElse: () => Effect.void,
+    })
+
+  /**
+   * Destroy the local ends of the child's stdio pipes so `close` can fire even
+   * when an escaped (setsid/double-fork) descendant holds an inherited fd.
+   * Trailing output from such a holder is accepted as lost.
+   */
+  const destroyStdio = (proc: NodeChildProcess.ChildProcess) =>
+    Effect.sync(() => {
+      proc.stdout?.destroy()
+      proc.stderr?.destroy()
+      for (const fd of proc.stdio.slice(3)) {
+        if (fd && typeof (fd as { destroy?: unknown }).destroy === "function") {
+          ;(fd as { destroy: () => void }).destroy()
+        }
+      }
+    })
+
+  /**
+   * Terminate the child (group-gated on POSIX) with TERM -> grace -> KILL and
+   * a bounded wait for `close` at every step. The wait is never unbounded: if
+   * the process is gone but `close` is wedged by an escaped fd holder, the
+   * local stdio readers are destroyed so the call can return.
+   */
+  const terminate = (
+    command: ChildProcess.StandardCommand,
+    proc: NodeChildProcess.ChildProcess,
+    signal: ExitSignal,
+    sig: NodeJS.Signals,
+    grace: Duration.Input,
+  ): Effect.Effect<void, PlatformError.PlatformError> =>
+    Effect.gen(function* () {
+      const signaled = yield* send(command, proc, sig).pipe(Effect.catch(() => Effect.succeed(false)))
+      if (signaled) {
+        yield* awaitClosed(signal, grace)
+        if (yield* Deferred.isDone(signal)) return
+        const killed = yield* send(command, proc, "SIGKILL").pipe(Effect.catch(() => Effect.succeed(false)))
+        if (killed) {
+          yield* awaitClosed(signal, "1 second")
+          if (yield* Deferred.isDone(signal)) return
+        }
+      }
+      yield* destroyStdio(proc)
+      yield* awaitClosed(signal, "1 second")
+    })
+
 
   const source = (handle: ChildProcessHandle, from: ChildProcess.PipeFromOption | undefined) => {
     const opt = from ?? "stdout"
@@ -381,24 +450,18 @@ export const make = Effect.gen(function* () {
             }),
             Effect.fnUntraced(function* ([proc, signal]) {
               const done = yield* Deferred.isDone(signal)
-              const kill = timeout(proc, command, command.options)
               if (done) {
                 const [code] = yield* Deferred.await(signal)
                 if (process.platform === "win32") return yield* Effect.void
-                if (code !== 0 && Predicate.isNotNull(code)) return yield* Effect.ignore(kill(killGroup))
+                // leader exited non-zero: TERM leftover group members (gated)
+                if (code !== 0 && Predicate.isNotNull(code)) {
+                  return yield* Effect.ignore(send(command, proc, command.options.killSignal ?? "SIGTERM"))
+                }
                 return yield* Effect.void
               }
-              const send = (s: NodeJS.Signals) =>
-                Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
-              const sig = command.options.killSignal ?? "SIGTERM"
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
-              const escalated = command.options.forceKillAfter
-                ? Effect.timeoutOrElse(attempt, {
-                    duration: command.options.forceKillAfter,
-                    orElse: () => send("SIGKILL").pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid),
-                  })
-                : attempt
-              return yield* Effect.ignore(escalated)
+              return yield* Effect.ignore(
+                terminate(command, proc, signal, command.options.killSignal ?? "SIGTERM", command.options.forceKillAfter ?? "3 seconds"),
+              )
             }),
           )
 
@@ -424,17 +487,8 @@ export const make = Effect.gen(function* () {
                 ),
               )
             }),
-            kill: (opts?: ChildProcess.KillOptions) => {
-              const sig = opts?.killSignal ?? "SIGTERM"
-              const send = (s: NodeJS.Signals) =>
-                Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
-              if (!opts?.forceKillAfter) return attempt
-              return Effect.timeoutOrElse(attempt, {
-                duration: opts.forceKillAfter,
-                orElse: () => send("SIGKILL").pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid),
-              })
-            },
+            kill: (opts?: ChildProcess.KillOptions) =>
+              terminate(command, proc, signal, opts?.killSignal ?? "SIGTERM", opts?.forceKillAfter ?? "3 seconds"),
             unref: Effect.sync(() => {
               if (ref) {
                 proc.unref()
