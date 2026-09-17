@@ -1,0 +1,7 @@
+Command:
+  cd /home/ezotoff/src/opencode/packages/opencode && bun test test/bash-lifecycle-repro.test.ts
+
+Result:
+  PASS — 10 tests, 0 failures, 50 assertions.
+  The test "orderly shutdown cleans this server instance only" terminated the owned process group through ProcessGroup.signal, preserved the simulated foreign-instance process and registry entry, and removed the owned entry.
+  The ordering hook observed ["registered", "visible"].

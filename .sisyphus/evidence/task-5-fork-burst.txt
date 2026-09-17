@@ -1,0 +1,8 @@
+Command:
+  cd /home/ezotoff/src/opencode/packages/opencode && bun test test/bash-lifecycle-repro.test.ts
+
+Result:
+  PASS — 10 tests, 0 failures, 50 assertions.
+  fork-burst-evidence {"baseline":4562,"final":4560,"delta":-2,"latencies":[1032,1034,1025,1023,1029],"followups":[25,28,20,18,13]}
+  Five sequential invocations each forked 20 short-lived children plus one contained sleep 1.
+  All invocation latencies were below 3000ms; all follow-up printf calls were below 500ms; fd delta was -2 (required <= 5); completion events were <= 10 per invocation.
