@@ -15,6 +15,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ProcessGroup } from "@opencode-ai/core/process-group"
 import { ShellID } from "./shell/id"
+import { ShellLifecycle } from "./shell/lifecycle"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -433,6 +434,7 @@ export const ShellTool = Tool.define(
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
+        directory: string
       },
       ctx: Tool.Context,
     ) {
@@ -481,11 +483,11 @@ export const ShellTool = Tool.define(
 
       // Per-invocation lifecycle telemetry (redacted: no command text). T5 wires
       // this into the server's logging pipeline.
-      const lifecycle = {
+      const lifecycle: ShellLifecycle.State = {
         reason: "exit" as "exit" | "timeout" | "abort",
         containment: "unknown" as "contained" | "escaped-observed" | "unknown",
-        term: null as string | null,
-        kill: null as string | null,
+        term: null,
+        kill: null,
         cleanupMs: 0,
         forcedPipeClose: false,
         drainTruncated: false,
@@ -502,6 +504,13 @@ export const ShellTool = Tool.define(
           const group = ProcessGroup.arm(Number(handle.pid))
           const supervised = group.armed
           if (supervised) lifecycle.containment = "contained"
+          const registration = ShellLifecycle.register({
+            invocationID: ctx.callID,
+            directory: input.directory,
+            group,
+          })
+          yield* Effect.addFinalizer(() => Effect.sync(() => ShellLifecycle.remove(registration)))
+          ShellLifecycle.visible(registration)
           const deadline = Date.now() + input.timeout + 100
           // spawning -> running -> terminating -> reaped; exactly one terminal
           // transition, cleanup is idempotent via the phase guard
@@ -684,6 +693,8 @@ export const ShellTool = Tool.define(
         }),
       ).pipe(Effect.orDie)
 
+      yield* ShellLifecycle.emit({ invocationID: ctx.callID, ...lifecycle })
+
       const meta: string[] = []
       if (expired) {
         meta.push(
@@ -762,6 +773,7 @@ export const ShellTool = Tool.define(
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
+                  directory: instanceCtx.directory,
                 },
                 ctx,
               )
