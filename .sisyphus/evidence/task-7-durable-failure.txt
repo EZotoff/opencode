@@ -1,0 +1,14 @@
+Command (2026-09-18, packages/opencode):
+bun test test/cli/durable-run.test.ts
+
+Result (exit 0):
+bun test v1.3.14 (0d9b296a)
+3 pass
+0 fail
+9 expect() calls
+
+The manager-unavailable test prepends a fake systemctl to PATH. It returns exit 1 for
+`systemctl --user is-system-running`; the CLI exits nonzero with instructions to run
+`systemctl --user status` and enable lingering. The fake call log contains exactly one
+entry (`--user is-system-running`), proving no launch or partial-unit cleanup target was
+created.

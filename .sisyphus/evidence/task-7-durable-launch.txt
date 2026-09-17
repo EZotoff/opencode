@@ -1,0 +1,14 @@
+Command (2026-09-18, packages/opencode):
+BEFORE=$(systemctl --user list-units 'oc-durable-*' --no-legend --no-pager); OUTPUT=$(bun run --conditions=browser ./src/index.ts durable-run --working-directory /tmp/opencode -- sleep 5); printf '%s\n' "$OUTPUT"; UNIT=$(printf '%s\n' "$OUTPUT" | awk '/Started durable unit:/ {print $4}'); printf 'UNIT=%s\n' "$UNIT"; systemctl --user is-active "$UNIT"; bun run --conditions=browser ./src/index.ts durable-run --stop "$UNIT"; if systemctl --user is-active "$UNIT"; then exit 1; else printf 'inactive-after-stop\n'; fi; systemctl --user reset-failed "$UNIT" 2>/dev/null || true; AFTER=$(systemctl --user list-units 'oc-durable-*' --no-legend --no-pager); test "$BEFORE" = "$AFTER"; printf 'unit-list-unchanged\n'
+
+Result (exit 0):
+Started durable unit: oc-durable-ez-raider-mu667i44-491bd0e73632
+Logs: journalctl --user -u oc-durable-ez-raider-mu667i44-491bd0e73632 -f
+Status: systemctl --user status oc-durable-ez-raider-mu667i44-491bd0e73632
+Stop: systemctl --user stop oc-durable-ez-raider-mu667i44-491bd0e73632
+UNIT=oc-durable-ez-raider-mu667i44-491bd0e73632
+active
+Stopped durable unit: oc-durable-ez-raider-mu667i44-491bd0e73632
+inactive
+inactive-after-stop
+unit-list-unchanged
