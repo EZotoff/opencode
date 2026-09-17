@@ -53,6 +53,8 @@ let hooks: Hooks = {}
 
 const keyOf = (instanceID: string, invocationID: string) => `${instanceID}:${invocationID}`
 
+export const invocationID = (value: string | undefined) => value ?? randomUUID()
+
 export const register = (input: {
   readonly invocationID: string
   readonly directory: string

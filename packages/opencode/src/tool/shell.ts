@@ -449,6 +449,7 @@ export const ShellTool = Tool.define(
       let cut = false
       let expired = false
       let aborted = false
+      const invocationID = ShellLifecycle.invocationID(ctx.callID)
 
       const closeSink = Effect.fnUntraced(function* () {
         const stream = sink
@@ -505,7 +506,7 @@ export const ShellTool = Tool.define(
           const supervised = group.armed
           if (supervised) lifecycle.containment = "contained"
           const registration = ShellLifecycle.register({
-            invocationID: ctx.callID,
+            invocationID,
             directory: input.directory,
             group,
           })
@@ -693,7 +694,7 @@ export const ShellTool = Tool.define(
         }),
       ).pipe(Effect.orDie)
 
-      yield* ShellLifecycle.emit({ invocationID: ctx.callID, ...lifecycle })
+      yield* ShellLifecycle.emit({ invocationID, ...lifecycle })
 
       const meta: string[] = []
       if (expired) {
