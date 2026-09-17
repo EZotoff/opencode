@@ -250,9 +250,13 @@ export function DialogSessionList() {
     // this list, so a parent running work through a background sub-agent showed no
     // spinner and looked inactive. Aggregate busy/retry child statuses into their
     // parent rows; the parent's own status check below is unchanged.
+    // The browse/search resources query with roots:true, so children must also be
+    // taken from the unfiltered sync.data.session list (directory-scoped).
     const workingChildParents = new Set<string>()
-    for (const child of sessions()) {
-      if (child.parentID === undefined) continue
+    const seenChildren = new Set<string>()
+    for (const child of [...sessions(), ...sync.data.session]) {
+      if (child.parentID === undefined || seenChildren.has(child.id)) continue
+      seenChildren.add(child.id)
       const childStatus = sync.data.session_status?.[child.id]
       if (childStatus?.type === "busy" || childStatus?.type === "retry") workingChildParents.add(child.parentID)
     }
