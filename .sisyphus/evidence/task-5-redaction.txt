@@ -1,0 +1,6 @@
+Command:
+  cd /home/ezotoff/src/opencode/packages/opencode && bun test test/bash-lifecycle-repro.test.ts
+
+Result:
+  PASS — 10 tests, 0 failures, 50 assertions.
+  The test "registers before visibility and emits redacted lifecycle telemetry" asserted the canary TASK5_SECRET_CANARY was absent from serialized events and asserted invocationID, reason, containment, TERM/KILL outcomes, cleanupMs, forcedPipeClose, and drainTruncated.
