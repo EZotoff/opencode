@@ -246,6 +246,16 @@ export function DialogSessionList() {
 
   const options = createMemo(() => {
     const today = new Date().toDateString()
+    // opencode--tui-subagent-spinner: sub-agent (child) sessions are hidden from
+    // this list, so a parent running work through a background sub-agent showed no
+    // spinner and looked inactive. Aggregate busy/retry child statuses into their
+    // parent rows; the parent's own status check below is unchanged.
+    const workingChildParents = new Set<string>()
+    for (const child of sessions()) {
+      if (child.parentID === undefined) continue
+      const childStatus = sync.data.session_status?.[child.id]
+      if (childStatus?.type === "busy" || childStatus?.type === "retry") workingChildParents.add(child.parentID)
+    }
     const sessionMap = new Map(
       sessions()
         .filter((x) => x.parentID === undefined)
@@ -274,7 +284,7 @@ export function DialogSessionList() {
 
       const isDeleting = toDelete() === x.id
       const status = sync.data.session_status?.[x.id]
-      const isWorking = status?.type === "busy" || status?.type === "retry"
+      const isWorking = status?.type === "busy" || status?.type === "retry" || workingChildParents.has(x.id)
       const slot = slotByID.get(x.id)
       const gutter = isWorking
         ? () => <Spinner />
