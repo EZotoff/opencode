@@ -13,6 +13,7 @@ import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
+import { ProcessGroup } from "@opencode-ai/core/process-group"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
@@ -478,10 +479,33 @@ export const ShellTool = Tool.define(
         },
       })
 
+      // Per-invocation lifecycle telemetry (redacted: no command text). T5 wires
+      // this into the server's logging pipeline.
+      const lifecycle = {
+        reason: "exit" as "exit" | "timeout" | "abort",
+        containment: "unknown" as "contained" | "escaped-observed" | "unknown",
+        term: null as string | null,
+        kill: null as string | null,
+        cleanupMs: 0,
+        forcedPipeClose: false,
+        drainTruncated: false,
+      }
+
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+
+          // Supervised process-group lifecycle (POSIX only; degrades to the
+          // pre-existing behavior when the group identity cannot be verified).
+          // Contract: .sisyphus/debates/bash-lifecycle-orphan-wedge/judges/contract-addendum-v2.md
+          const group = ProcessGroup.arm(Number(handle.pid))
+          const supervised = group.armed
+          if (supervised) lifecycle.containment = "contained"
+          const deadline = Date.now() + input.timeout + 100
+          // spawning -> running -> terminating -> reaped; exactly one terminal
+          // transition, cleanup is idempotent via the phase guard
+          let phase: "spawning" | "running" | "terminating" | "reaped" = "running"
 
           yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
@@ -539,22 +563,124 @@ export const ShellTool = Tool.define(
 
           const timeout = Effect.sleep(`${input.timeout + 100} millis`)
 
-          const exit = yield* Effect.raceAll([
-            handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
-            abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
-            timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
-          ])
+          // Normal completion requires an EMPTY owned-group enumeration: leader
+          // exit (close) alone never authorizes returning while members remain.
+          const waitQuiescence = (code: number): Effect.Effect<{ kind: "exit"; code: number } | { kind: "timeout"; code: null }> =>
+            Effect.gen(function* () {
+              for (;;) {
+                const left = ProcessGroup.members(group)
+                if (left !== undefined && left.length === 0) return { kind: "exit" as const, code }
+                if (Date.now() >= deadline) return { kind: "timeout" as const, code: null }
+                yield* Effect.sleep("100 millis")
+              }
+            })
 
-          if (exit.kind === "abort") {
-            aborted = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
-          }
-          if (exit.kind === "timeout") {
-            expired = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+          // Bounded final drain: once the group is empty, `close` flushes
+          // promptly unless an escaped descendant holds an inherited fd — in
+          // that case the call returns without it (trailing-output loss
+          // accepted) and the readers are force-closed during cleanup.
+          const drain = (): Effect.Effect<{ closed: boolean; code: number | null }> =>
+            Effect.timeoutOrElse(
+              handle.exitCode.pipe(
+                Effect.map((code) => ({ closed: true, code: code as number | null })),
+                Effect.catch(() => Effect.succeed({ closed: true, code: null })),
+              ),
+              {
+                duration: "250 millis",
+                orElse: () => Effect.succeed({ closed: false, code: null }),
+              },
+            )
+
+          // Wedge detector: the leader can exit while `close` stays wedged on
+          // an escaped fd holder. Poll leader liveness (cheap) and only
+          // enumerate members once the leader is gone.
+          const supervise: Effect.Effect<{ kind: "exit"; code: number | null } | { kind: "timeout"; code: null }> =
+            Effect.gen(function* () {
+              for (;;) {
+                const state = ProcessGroup.leader(group)
+                if (state !== "alive") {
+                  const left = ProcessGroup.members(group)
+                  if (left !== undefined && left.length === 0) {
+                    const drained = yield* drain()
+                    if (!drained.closed) {
+                      lifecycle.containment = "escaped-observed"
+                      lifecycle.drainTruncated = true
+                      lifecycle.forcedPipeClose = true
+                    }
+                    return { kind: "exit" as const, code: drained.code }
+                  }
+                  if (Date.now() >= deadline) return { kind: "timeout" as const, code: null }
+                }
+                yield* Effect.sleep("100 millis")
+              }
+            })
+
+          const exit = yield* Effect.raceAll(
+            supervised
+              ? [
+                  handle.exitCode.pipe(Effect.andThen((code) => waitQuiescence(code))),
+                  supervise,
+                  abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
+                  timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+                ]
+              : [
+                  handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
+                  abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
+                  timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+                ],
+          )
+
+          if (exit.kind === "exit") {
+            return exit.code
           }
 
-          return exit.kind === "exit" ? exit.code : null
+          // Abort and timeout share the identical cleanup path.
+          if (phase === "running") {
+            phase = "terminating"
+            if (exit.kind === "abort") {
+              aborted = true
+              lifecycle.reason = "abort"
+            } else {
+              expired = true
+              lifecycle.reason = "timeout"
+            }
+            const cleanupStart = Date.now()
+            if (supervised) {
+              lifecycle.term = ProcessGroup.signal(group, "SIGTERM").tag
+              const graceEnd = Date.now() + 3000
+              for (;;) {
+                const left = ProcessGroup.members(group)
+                if (left !== undefined && left.length === 0) break
+                if (Date.now() >= graceEnd) break
+                yield* Effect.sleep("50 millis")
+              }
+              const left = ProcessGroup.members(group)
+              if (left === undefined || left.length > 0) {
+                lifecycle.kill = ProcessGroup.signal(group, "SIGKILL").tag
+                const killEnd = Date.now() + 1000
+                for (;;) {
+                  const rest = ProcessGroup.members(group)
+                  if (rest !== undefined && rest.length === 0) break
+                  if (Date.now() >= killEnd) break
+                  yield* Effect.sleep("50 millis")
+                }
+              }
+              const drained = yield* drain()
+              if (!drained.closed) {
+                lifecycle.containment = "escaped-observed"
+                lifecycle.drainTruncated = true
+                lifecycle.forcedPipeClose = true
+              }
+            }
+            // Bounded close of the local readers; on POSIX the spawner-side
+            // gate blocks its signals (group already cleaned), so this only
+            // forces stdio destruction when an escaped fd holder wedges `close`.
+            yield* handle.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore)
+            ProcessGroup.disarm(group)
+            lifecycle.cleanupMs = Date.now() - cleanupStart
+            phase = "reaped"
+          }
+          return null
         }),
       ).pipe(Effect.orDie)
 
@@ -589,6 +715,7 @@ export const ShellTool = Tool.define(
           exit: code,
           truncated: cut,
           ...(cut && file ? { outputPath: file } : {}),
+          lifecycle,
         },
         output,
       }
