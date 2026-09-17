@@ -22,6 +22,7 @@ import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
+import * as ShellHygiene from "./shell/hygiene"
 import { BashArity } from "@/permission/arity"
 
 export { Parameters } from "./shell/prompt"
@@ -346,7 +347,8 @@ export const ShellTool = Tool.define(
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
     const flags = yield* RuntimeFlags.Service
-    const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
+    const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? ShellHygiene.DEFAULT_TIMEOUT_MS
+    const maxTimeoutMs = flags.bashMaxTimeoutMs ?? ShellHygiene.MAX_TIMEOUT_MS
 
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -434,6 +436,8 @@ export const ShellTool = Tool.define(
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
+        clampedFrom?: number
+        warnings?: string[]
         directory: string
       },
       ctx: Tool.Context,
@@ -703,6 +707,12 @@ export const ShellTool = Tool.define(
         )
       }
       if (aborted) meta.push("User aborted the command")
+      if (input.clampedFrom !== undefined) {
+        meta.push(
+          `shell tool clamped requested timeout ${input.clampedFrom} ms to the configured maximum of ${input.timeout} ms (OPENCODE_EXPERIMENTAL_BASH_MAX_TIMEOUT_MS).`,
+        )
+      }
+      for (const warning of input.warnings ?? []) meta.push(warning)
       const raw = list.map((item) => item.text).join("")
       const end = tail(raw, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
@@ -739,7 +749,7 @@ export const ShellTool = Tool.define(
         const shell = Shell.acceptable(cfg.shell)
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
-        const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
+        const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs, maxTimeoutMs)
         yield* Effect.logInfo("shell tool using shell", { shell })
 
         return {
@@ -754,7 +764,8 @@ export const ShellTool = Tool.define(
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }
-              const timeout = params.timeout ?? defaultTimeoutMs
+              const { timeout, clampedFrom } = ShellHygiene.resolveTimeout(params.timeout, defaultTimeoutMs, maxTimeoutMs)
+              const warnings = ShellHygiene.detachWarnings(params.command)
               const ps = Shell.ps(shell)
               yield* Effect.scoped(
                 Effect.gen(function* () {
@@ -774,6 +785,8 @@ export const ShellTool = Tool.define(
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
+                  ...(clampedFrom !== undefined ? { clampedFrom } : {}),
+                  warnings,
                   directory: instanceCtx.directory,
                 },
                 ctx,

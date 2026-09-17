@@ -75,7 +75,7 @@ function chainGuidance(name: string) {
   return "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead."
 }
 
-function bashCommandSection(chain: string, limits: Limits, defaultTimeoutMs: number) {
+function bashCommandSection(chain: string, limits: Limits, defaultTimeoutMs: number, maxTimeoutMs: number) {
   return `Before executing the command, please follow these steps:
 
 1. Directory Verification:
@@ -94,7 +94,8 @@ function bashCommandSection(chain: string, limits: Limits, defaultTimeoutMs: num
 
 Usage notes:
   - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms.
+  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms. Requests above ${maxTimeoutMs}ms are clamped to that cap.
+  - Process lifetime: each call owns a process group that is fully killed on timeout/abort — \`nohup\`/bare \`&\` background jobs die with the call BY DESIGN. Do not poll with \`sleep\` or \`tail -f\` inside a call; make one fast sub-second probe and check again next turn. For work that must outlive the call, use \`opencode durable-run\`.
   - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`head\`, \`tail\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
   - Avoid using Bash with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
@@ -218,7 +219,7 @@ Usage notes:
     </bad-example>`
 }
 
-function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
+function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number, maxTimeoutMs: number) {
   const isPowerShell = PS.has(name)
   const chain = chainGuidance(name)
   if (CMD.has(name)) {
@@ -259,7 +260,7 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
       "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
     workdirSection:
       "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
-    commandSection: bashCommandSection(chain, limits, defaultTimeoutMs),
+      commandSection: bashCommandSection(chain, limits, defaultTimeoutMs, maxTimeoutMs),
     gitCommands: "bash commands",
     gitCommandRestriction: "git bash commands",
     createPrInstruction:
@@ -270,8 +271,8 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
   }
 }
 
-export function render(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
-  const selected = profile(name, platform, limits, defaultTimeoutMs)
+export function render(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number, maxTimeoutMs: number) {
+  const selected = profile(name, platform, limits, defaultTimeoutMs, maxTimeoutMs)
   return {
     description: renderPrompt(DESCRIPTION, {
       intro: selected.intro,
