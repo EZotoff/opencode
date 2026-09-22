@@ -422,6 +422,30 @@ describe("bash lifecycle repro (baseline)", () => {
     20_000,
   )
 
+  it.live(
+    "(h) declared timeout bounds a long foreground command (incident: sleep 55 / timeout 70000)",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const start = Date.now()
+          // Incident shape: a foreground command whose natural runtime exceeds the
+          // declared timeout must be terminated at the timeout, not run to completion.
+          // The incident used `sleep 55; ...` with timeout 70000; the timeout is
+          // scaled down here so the regression stays fast.
+          const result = yield* run({
+            command: "sleep 55; echo done",
+            timeout: 3000,
+          })
+          const elapsed = Date.now() - start
+          expect(elapsed).toBeLessThan(3000 + 5000)
+          expect(result.output).toContain("exceeding timeout")
+          expect(result.metadata.lifecycle.reason).toBe("timeout")
+        }),
+      ),
+    30_000,
+  )
+
   if (!posix) {
     it.live("(b)/(c) skipped on win32", () => Effect.void)
   }
