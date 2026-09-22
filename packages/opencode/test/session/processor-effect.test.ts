@@ -5,6 +5,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -225,6 +226,15 @@ const fragmentFailureLLM = Layer.succeed(
 )
 const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
+
+const stalledLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () => Stream.never,
+  }),
+)
+const stalledEnv = LayerNode.compile(root, [...replacements, [LLM.node, stalledLLM]])
+const itStalled = testEffect(stalledEnv)
 
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
@@ -759,6 +769,62 @@ it.live("session.processor effect tests publish retry status updates", () =>
         expect(states).toStrictEqual([1])
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+itStalled.effect("session.processor effect tests retry a stalled stream", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "stall")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const retried = defer<{ attempt: number; message: string }>()
+        const off = yield* events.listen((evt) => {
+          if (evt.type !== SessionStatus.Event.Status.type) return Effect.void
+          const data = evt.data as typeof SessionStatus.Event.Status.data.Type
+          if (data.sessionID === chat.id && data.status.type === "retry") retried.resolve(data.status)
+          return Effect.void
+        })
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const run = yield* handle
+          .process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "stall" }],
+            tools: {},
+          })
+          .pipe(Effect.forkChild)
+
+        yield* Effect.yieldNow
+        yield* TestClock.adjust("600000 millis")
+        const retry = yield* Effect.promise(() => retried.promise)
+        yield* Fiber.interrupt(run)
+        yield* off
+
+        expect(retry.attempt).toBe(1)
+        expect(retry.message).toContain("LLM stream stalled")
+      }),
+    { config: cfg },
   ),
 )
 

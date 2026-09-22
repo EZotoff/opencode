@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Clock, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -25,8 +25,10 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { ProviderError } from "@/provider/error"
 
 const DOOM_LOOP_THRESHOLD = 3
+const STREAM_STALL_DEFAULT_MS = 600_000
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -113,6 +115,8 @@ const layer = Layer.effect(
         reasoningMap: {},
       }
       let aborted = false
+      let streamStalled = false
+      let streamSettled = false
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -648,24 +652,53 @@ const layer = Layer.effect(
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            streamStalled = false
+            streamSettled = false
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
+            const configured = Number(Bun.env.OPENCODE_STREAM_STALL_MS)
+            const stall = Number.isFinite(configured) && configured > 0 ? configured : STREAM_STALL_DEFAULT_MS
+            let lastEvent = yield* Clock.currentTimeMillis
             const stream = llm.stream(streamInput)
+            const watchdog = Effect.gen(function* () {
+              while (true) {
+                const remaining = stall - ((yield* Clock.currentTimeMillis) - lastEvent)
+                if (remaining <= 0) {
+                  streamStalled = true
+                  return yield* Effect.fail(new ProviderError.ResponseStreamError(`LLM stream stalled for ${stall}ms`))
+                }
+                yield* Effect.sleep(`${remaining} millis`)
+              }
+            })
 
-            yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
-              Stream.runDrain,
+            yield* Effect.raceFirst(
+              stream.pipe(
+                Stream.tap((event) => {
+                  return Clock.currentTimeMillis.pipe(
+                    Effect.tap((now) => Effect.sync(() => (lastEvent = now))),
+                    Effect.andThen(handleEvent(event)),
+                  )
+                }),
+                Stream.takeUntil(() => ctx.needsCompaction),
+                Stream.runDrain,
+                Effect.onExit((exit) => {
+                  if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return Effect.void
+                  return Effect.sync(() => (streamSettled = true))
+                }),
+              ),
+              watchdog,
             )
           }).pipe(
             Effect.onInterrupt(() =>
-              Effect.gen(function* () {
-                aborted = true
-                if (!ctx.assistantMessage.error) {
-                  yield* halt(new DOMException("Aborted", "AbortError"))
-                }
-              }),
+              streamStalled || streamSettled
+                ? Effect.void
+                : Effect.gen(function* () {
+                    aborted = true
+                    if (!ctx.assistantMessage.error) {
+                      yield* halt(new DOMException("Aborted", "AbortError"))
+                    }
+                  }),
             ),
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
@@ -675,15 +708,23 @@ const layer = Layer.effect(
               SessionRetry.policy({
                 provider: input.model.providerID,
                 parse,
-                set: (info) => {
-                  return status.set(ctx.sessionID, {
-                    type: "retry",
-                    attempt: info.attempt,
-                    message: info.message,
-                    action: info.action,
-                    next: info.next,
-                  })
-                },
+                set: (info) =>
+                  status
+                    .set(ctx.sessionID, {
+                      type: "retry",
+                      attempt: info.attempt,
+                      message: info.message,
+                      action: info.action,
+                      next: info.next,
+                    })
+                    .pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() => {
+                          streamStalled = false
+                          streamSettled = false
+                        }),
+                      ),
+                    ),
               }),
             ),
             Effect.catch(halt),
