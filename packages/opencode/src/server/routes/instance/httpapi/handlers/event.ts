@@ -28,7 +28,9 @@ function eventResponse(events: EventV2.Interface) {
     const workspaceID = yield* InstanceState.workspaceID
     // Listener registration is eager, so events published after this point cannot
     // be lost while the HTTP body fiber is starting or emitting server.connected.
-    const queue = yield* Queue.unbounded<EventV2.Payload>()
+    // opencode--sse-queue-bounded: sliding (drop-oldest) cap so a slow subscriber
+    // cannot accumulate unbounded event payloads in RAM (upstream #45215).
+    const queue = yield* Queue.sliding<EventV2.Payload>(256)
     const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
@@ -38,7 +40,8 @@ function eventResponse(events: EventV2.Interface) {
       // back to heavyweight HTTP polling. Keep the workspaceID scoping.
       Stream.filter(
         (event) =>
-          event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID,
+          event.location?.directory === instance.directory &&
+          (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )

@@ -25,13 +25,19 @@ function eventData(data: unknown): Sse.Event {
 function eventResponse() {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
-    const events = Stream.callback<GlobalBusEvent>((queue) => {
+    // opencode--sse-queue-bounded: sliding (drop-oldest) cap — same rationale
+    // as event.ts (upstream #45215); healthy consumers drain in ms, slow ones
+    // drop stale events (part.updated snapshots reconcile on next delivery).
+    const events = Stream.callback<GlobalBusEvent>(
+      (queue) => {
       const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
       return Effect.acquireRelease(
         Effect.sync(() => GlobalBus.on("event", handler)),
         () => Effect.sync(() => GlobalBus.off("event", handler)),
       )
-    })
+      },
+      { bufferSize: 256, strategy: "sliding" },
+    )
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),

@@ -118,6 +118,11 @@ const layer = Layer.effect(
       let streamStalled = false
       let streamSettled = false
       const inFlightQuestions = new Set<string>()
+      // opencode--question-suspend-cap: bound the stall-watchdog suspension while
+      // questions are pending (48eedf9406 suspended forever — orphaned permission
+      // dialogs made immortal busy sessions holding transcripts/streams in RAM).
+      const questionSuspendCapMs = Number(process.env.QUESTION_SUSPEND_CAP_MS ?? 30 * 60_000)
+      let questionSuspendStarted: number | undefined
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -661,6 +666,7 @@ const layer = Layer.effect(
             streamStalled = false
             streamSettled = false
             inFlightQuestions.clear()
+            questionSuspendStarted = undefined
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
@@ -673,8 +679,13 @@ const layer = Layer.effect(
                 const remaining = stall - ((yield* Clock.currentTimeMillis) - lastEvent)
                 if (remaining <= 0) {
                   if (inFlightQuestions.size > 0) {
-                    lastEvent = yield* Clock.currentTimeMillis
-                    continue
+                    const now = yield* Clock.currentTimeMillis
+                    questionSuspendStarted ??= now
+                    if (now - questionSuspendStarted < questionSuspendCapMs) {
+                      lastEvent = now
+                      continue
+                    }
+                    // suspension budget exhausted — fall through to stall handling
                   }
                   streamStalled = true
                   return yield* Effect.fail(new ProviderError.ResponseStreamError(`LLM stream stalled for ${stall}ms`))
