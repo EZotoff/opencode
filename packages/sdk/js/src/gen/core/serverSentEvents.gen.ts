@@ -216,7 +216,6 @@ export const createSseClient = <TData = unknown>({
         conn.abort()
       }
     }
-    }
   }
 
   const stream = createStream()
