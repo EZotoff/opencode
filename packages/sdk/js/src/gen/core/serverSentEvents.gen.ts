@@ -98,8 +98,19 @@ export const createSseClient = <TData = unknown>({
         headers.set("Last-Event-ID", lastEventId)
       }
 
+      // Per-connection controller: guarantees the fetch connection terminates
+      // when this generator exits (consumer break/return/throw, natural
+      // completion, or caller abort). Previously the finally only released
+      // the reader lock, leaking the socket on early generator exit.
+      const conn = new AbortController()
+      const forwardAbort = () => conn.abort()
+      if (options.signal) {
+        if (options.signal.aborted) conn.abort()
+        else options.signal.addEventListener("abort", forwardAbort, { once: true })
+      }
+
       try {
-        const response = await fetch(url, { ...options, headers, signal })
+        const response = await fetch(url, { ...options, headers, signal: conn.signal })
 
         if (!response.ok) throw new Error(`SSE failed: ${response.status} ${response.statusText}`)
 
@@ -108,16 +119,6 @@ export const createSseClient = <TData = unknown>({
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
 
         let buffer = ""
-
-        const abortHandler = () => {
-          try {
-            void reader.cancel()
-          } catch {
-            // noop
-          }
-        }
-
-        signal.addEventListener("abort", abortHandler)
 
         try {
           while (true) {
@@ -184,7 +185,15 @@ export const createSseClient = <TData = unknown>({
             }
           }
         } finally {
-          signal.removeEventListener("abort", abortHandler)
+          // Primary teardown: aborting terminates the fetch connection
+          // (no-op if the response already completed).
+          conn.abort()
+          // Secondary belt-and-braces: cancel the body stream.
+          try {
+            await reader.cancel()
+          } catch {
+            // noop
+          }
           reader.releaseLock()
         }
 
@@ -200,6 +209,11 @@ export const createSseClient = <TData = unknown>({
         // exponential backoff: double retry each attempt, cap at 30s
         const backoff = Math.min(retryDelay * 2 ** (attempt - 1), sseMaxRetryDelay ?? 30000)
         await sleep(backoff)
+      } finally {
+        // Covers failures BEFORE a reader exists (fetch/HTTP errors): the
+        // per-connection controller is always disposed per iteration.
+        if (options.signal) options.signal.removeEventListener("abort", forwardAbort)
+        conn.abort()
       }
     }
   }

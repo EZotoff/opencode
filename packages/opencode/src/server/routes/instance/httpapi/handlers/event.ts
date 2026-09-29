@@ -32,10 +32,13 @@ function eventResponse(events: EventV2.Interface) {
     const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
+      // Directory filter removed (opencode--sse-directory-filter-removal):
+      // events carry the publishing instance's directory, so cross-directory
+      // subscribers (worktrees, external observers) received nothing and fell
+      // back to heavyweight HTTP polling. Keep the workspaceID scoping.
       Stream.filter(
         (event) =>
-          event.location?.directory === instance.directory &&
-          (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
+          event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID,
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
