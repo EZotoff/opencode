@@ -40,8 +40,7 @@ function eventResponse(events: EventV2.Interface) {
       // back to heavyweight HTTP polling. Keep the workspaceID scoping.
       Stream.filter(
         (event) =>
-          event.location?.directory === instance.directory &&
-          (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
+          event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID,
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
