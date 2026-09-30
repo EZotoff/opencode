@@ -70,14 +70,15 @@ function eventResponse(events: EventV2.Interface) {
       Stream.map(() => ({ id: eventID(), type: "server.heartbeat", properties: {} })),
     )
 
-    yield* Effect.logInfo("event connected")
+    // opencode--self-sse-diagnostic: identify in-process loopback subscribers
+    yield* Effect.logInfo("event connected", { directory: instance.directory, workspaceID })
     return HttpServerResponse.stream(
       Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
         Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
-        Stream.ensuring(Effect.logInfo("event disconnected")),
+        Stream.ensuring(Effect.logInfo("event disconnected", { directory: instance.directory })),
       ),
       {
         contentType: "text/event-stream",
