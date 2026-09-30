@@ -8,6 +8,7 @@ import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
+import { passesEventScope } from "./event-scope"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -22,7 +23,7 @@ function eventID() {
   return EventV2.ID.create()
 }
 
-function eventResponse(events: EventV2.Interface) {
+function eventResponse(events: EventV2.Interface, scopeAll: boolean) {
   return Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
@@ -38,9 +39,14 @@ function eventResponse(events: EventV2.Interface) {
       // events carry the publishing instance's directory, so cross-directory
       // subscribers (worktrees, external observers) received nothing and fell
       // back to heavyweight HTTP polling. Keep the workspaceID scoping.
+      // opencode--event-scope-attach-congestion: re-scoped for the high-volume
+      // message classes only — unscoped firehose regressed shared servers
+      // (~2.3 MiB/s loopback + ~500 MB RSS per idle attach window);
+      // `?scope=all` restores the cross-directory firehose on request.
       Stream.filter(
         (event) =>
-          event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID,
+          (event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID) &&
+          passesEventScope(event.type, event.location?.directory, instance.directory, scopeAll),
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
@@ -92,13 +98,14 @@ function eventResponse(events: EventV2.Interface) {
   })
 }
 
-export const eventHandlers = HttpApiBuilder.group(EventApi, "event", (handlers) =>
+      export const eventHandlers = HttpApiBuilder.group(EventApi, "event", (handlers) =>
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
     return handlers.handleRaw(
       "subscribe",
-      Effect.fn("EventHttpApi.subscribe")(function* () {
-        return yield* eventResponse(events)
+      Effect.fn("EventHttpApi.subscribe")(function* (ctx) {
+        const scopeAll = new URL(ctx.request.url, "http://localhost").searchParams.get("scope") === "all"
+        return yield* eventResponse(events, scopeAll)
       }),
     )
   }),
