@@ -117,12 +117,6 @@ const layer = Layer.effect(
       let aborted = false
       let streamStalled = false
       let streamSettled = false
-      const inFlightQuestions = new Set<string>()
-      // opencode--question-suspend-cap: bound the stall-watchdog suspension while
-      // questions are pending (48eedf9406 suspended forever — orphaned permission
-      // dialogs made immortal busy sessions holding transcripts/streams in RAM).
-      const questionSuspendCapMs = Number(process.env.QUESTION_SUSPEND_CAP_MS ?? 30 * 60_000)
-      let questionSuspendStarted: number | undefined
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -343,9 +337,6 @@ const layer = Layer.effect(
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
             yield* ensureToolCall(value)
-            if (["question", "askuserquestion", "ask_user_question", "mcp_question"].includes(value.name.toLowerCase())) {
-              inFlightQuestions.add(value.id)
-            }
             const input = isRecord(value.input) ? value.input : { value: value.input }
             yield* updateToolCall(value.id, (match) => ({
               ...match,
@@ -394,7 +385,6 @@ const layer = Layer.effect(
           }
 
           case "tool-result": {
-            inFlightQuestions.delete(value.id)
             const toolCall = yield* readToolCall(value.id)
             if (!toolCall && value.result.type === "error") return
             if (value.result.type === "error") {
@@ -428,7 +418,6 @@ const layer = Layer.effect(
           }
 
           case "tool-error": {
-            inFlightQuestions.delete(value.id)
             yield* failToolCall(value.id, value.error ?? new Error(value.message))
             return
           }
@@ -665,8 +654,6 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             streamStalled = false
             streamSettled = false
-            inFlightQuestions.clear()
-            questionSuspendStarted = undefined
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
@@ -678,15 +665,6 @@ const layer = Layer.effect(
               while (true) {
                 const remaining = stall - ((yield* Clock.currentTimeMillis) - lastEvent)
                 if (remaining <= 0) {
-                  if (inFlightQuestions.size > 0) {
-                    const now = yield* Clock.currentTimeMillis
-                    questionSuspendStarted ??= now
-                    if (now - questionSuspendStarted < questionSuspendCapMs) {
-                      lastEvent = now
-                      continue
-                    }
-                    // suspension budget exhausted — fall through to stall handling
-                  }
                   streamStalled = true
                   return yield* Effect.fail(new ProviderError.ResponseStreamError(`LLM stream stalled for ${stall}ms`))
                 }
