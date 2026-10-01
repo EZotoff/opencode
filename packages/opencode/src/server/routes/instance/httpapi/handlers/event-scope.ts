@@ -37,6 +37,35 @@ export function passesEventScope(
   return true
 }
 
+/**
+ * Effective event type for scoping: durable `sync` events MIRROR the original
+ * event nested in syncEvent (type "message.part.updated.1" etc.) — the nested
+ * payload is just as fat, so scoping must see through the wrapper.
+ */
+export function effectiveEventType(payload: {
+  type: string
+  properties?: unknown
+  syncEvent?: { type?: string; aggregateID?: string }
+}): string {
+  if (payload.type === "sync" && typeof payload.syncEvent?.type === "string") {
+    return payload.syncEvent.type.replace(/\.1$/, "")
+  }
+  return payload.type
+}
+
+/** SessionID for scoping: sync events carry aggregateID (= sessionID); direct
+ * events carry it in properties (part/info/message/sessionID). */
+export function scopedSessionID(payload: {
+  type: string
+  properties?: unknown
+  syncEvent?: { type?: string; aggregateID?: string }
+}): string | undefined {
+  if (payload.type === "sync" && typeof payload.syncEvent?.aggregateID === "string") {
+    return payload.syncEvent.aggregateID
+  }
+  return eventSessionID(payload.properties)
+}
+
 /** Extract a sessionID from an event's properties across the payload shapes
  * used by high-volume classes (part.sessionID / info.sessionID / sessionID). */
 export function eventSessionID(properties: unknown): string | undefined {

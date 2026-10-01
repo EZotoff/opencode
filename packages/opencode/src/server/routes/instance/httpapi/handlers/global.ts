@@ -1,7 +1,7 @@
 import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
-import { eventSessionID, passesEventScope } from "./event-scope"
+import { effectiveEventType, passesEventScope, scopedSessionID } from "./event-scope"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
@@ -49,11 +49,11 @@ function eventResponse(requestUrl: string | undefined) {
       const handler = (event: GlobalBusEvent) => {
         if (
           !passesEventScope(
-            event.payload.type,
+            effectiveEventType(event.payload),
             event.directory,
             scopeDirectory,
             scopeAll,
-            eventSessionID(event.payload.properties),
+            scopedSessionID(event.payload),
             sessions,
           )
         ) {

@@ -81,3 +81,22 @@ describe("event SSE scope filter v2 (session-level + global route)", () => {
     expect(passesEventScope("message.part.updated", "/d", "/d", false, "c", parsed)).toBe(false)
   })
 })
+
+describe("sync-mirrored event scoping", () => {
+  test("effectiveEventType sees through sync wrapper and strips .1 suffix", () => {
+    const { effectiveEventType } = require("@/server/routes/instance/httpapi/handlers/event-scope")
+    expect(effectiveEventType({ type: "sync", syncEvent: { type: "message.part.updated.1" } })).toBe("message.part.updated")
+    expect(effectiveEventType({ type: "session.updated" })).toBe("session.updated")
+  })
+
+  test("scopedSessionID uses sync aggregateID; properties otherwise", () => {
+    const { scopedSessionID } = require("@/server/routes/instance/httpapi/handlers/event-scope")
+    expect(scopedSessionID({ type: "sync", syncEvent: { type: "message.part.updated.1", aggregateID: "ses_x" } })).toBe("ses_x")
+    expect(scopedSessionID({ type: "message.part.updated", properties: { part: { sessionID: "ses_y" } } })).toBe("ses_y")
+  })
+
+  test("sync-mirrored foreign part event is dropped for scoped subscriber", () => {
+    const { effectiveEventType } = require("@/server/routes/instance/httpapi/handlers/event-scope")
+    expect(passesEventScope(effectiveEventType({ type: "sync", syncEvent: { type: "message.part.updated.1" } }), "/other", "/own", false)).toBe(false)
+  })
+})
