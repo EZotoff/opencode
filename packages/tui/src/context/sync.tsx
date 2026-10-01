@@ -30,6 +30,7 @@ import { useExit } from "./exit"
 import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { useKV } from "./kv"
+import { shouldApplySessionEvent } from "./sync-guard"
 import { usePermission } from "./permission"
 
 const emptyConsoleState: ConsoleState = {
@@ -196,6 +197,7 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
+          if (!shouldApplySessionEvent(store, request.sessionID, directory, sdk.directory, kv)) break
           if (permission.mode === "auto") {
             void sdk.client.permission.reply({
               requestID: request.id,
@@ -263,13 +265,17 @@ export const {
           break
         }
 
-        case "todo.updated":
+        case "todo.updated": {
+          if (!shouldApplySessionEvent(store, event.properties.sessionID, directory, sdk.directory, kv)) break
           setStore("todo", event.properties.sessionID, event.properties.todos)
           break
+        }
 
-        case "session.diff":
+        case "session.diff": {
+          if (!shouldApplySessionEvent(store, event.properties.sessionID, directory, sdk.directory, kv)) break
           setStore("session_diff", event.properties.sessionID, event.properties.diff)
           break
+        }
 
         case "session.deleted": {
           const result = search(store.session, event.properties.info.id, (s) => s.id)
@@ -335,6 +341,7 @@ export const {
         }
 
         case "message.updated": {
+          if (!shouldApplySessionEvent(store, event.properties.info.sessionID, directory, sdk.directory, kv)) break
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
@@ -375,6 +382,7 @@ export const {
           break
         }
         case "message.removed": {
+          if (!shouldApplySessionEvent(store, event.properties.sessionID, directory, sdk.directory, kv)) break
           touchMessage(event.properties.sessionID, event.properties.messageID)
           const messages = store.message[event.properties.sessionID]
           const index = messages.findIndex((message) => message.id === event.properties.messageID)
@@ -390,6 +398,7 @@ export const {
           break
         }
         case "message.part.updated": {
+          if (!shouldApplySessionEvent(store, event.properties.part.sessionID, directory, sdk.directory, kv)) break
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
@@ -412,6 +421,7 @@ export const {
         }
 
         case "message.part.delta": {
+          if (!shouldApplySessionEvent(store, event.properties.sessionID, directory, sdk.directory, kv)) break
           const parts = store.part[event.properties.messageID]
           if (!parts) break
           const result = search(parts, event.properties.partID, (part) => part.id)

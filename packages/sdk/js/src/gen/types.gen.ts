@@ -1682,7 +1682,17 @@ export type Auth = OAuth | ApiAuth | WellKnownAuth
 export type GlobalEventData = {
   body?: never
   path?: never
-  query?: never
+  /**
+   * Scoping parameters (opencode--event-scope-attach-congestion v2):
+   * - directory: only receive high-volume message events from this directory
+   * - session: rendered session IDs (array; comma-joined on the wire)
+   * - scope: "all" opts back into the unfiltered firehose
+   */
+  query?: {
+    directory?: string
+    session?: string[]
+    scope?: string
+  }
   url: "/global/event"
 }
 

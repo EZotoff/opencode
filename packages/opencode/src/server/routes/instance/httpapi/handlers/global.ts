@@ -1,6 +1,7 @@
 import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
+import { effectiveEventType, passesEventScope, scopedSessionID } from "./event-scope"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
@@ -22,15 +23,44 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
-function eventResponse() {
+// opencode--event-scope-attach-congestion v2: per-connection scoping on the
+// GLOBAL route (the one `opencode attach` actually subscribes to). High-volume
+// message-class events are dropped per-connection unless they match the
+// subscriber's declared directory (?directory=) and, when declared, its
+// rendered sessions (?session=a&session=b or ?session=a,b). `?scope=all`
+// restores the firehose (dash/beacon). Param-less subscribers: unfiltered
+// (v1 behavior) — no unknown-client regression.
+function eventResponse(requestUrl: string | undefined) {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
+    const url = requestUrl === undefined ? undefined : new URL(requestUrl, "http://localhost")
+    const scopeAll = url?.searchParams.get("scope") === "all"
+    const scopeDirectory = url?.searchParams.get("directory") ?? undefined
+    const scopeSessions = new Set<string>()
+    for (const raw of url?.searchParams.getAll("session") ?? []) {
+      for (const part of raw.split(",")) if (part !== "") scopeSessions.add(part)
+    }
+    const sessions = scopeSessions.size > 0 ? scopeSessions : undefined
     // opencode--sse-queue-bounded: sliding (drop-oldest) cap — same rationale
     // as event.ts (upstream #45215); healthy consumers drain in ms, slow ones
     // drop stale events (part.updated snapshots reconcile on next delivery).
     const events = Stream.callback<GlobalBusEvent>(
       (queue) => {
-      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+      const handler = (event: GlobalBusEvent) => {
+        if (
+          !passesEventScope(
+            effectiveEventType(event.payload),
+            event.directory,
+            scopeDirectory,
+            scopeAll,
+            scopedSessionID(event.payload),
+            sessions,
+          )
+        ) {
+          return
+        }
+        Queue.offerUnsafe(queue, event)
+      }
       return Effect.acquireRelease(
         Effect.sync(() => GlobalBus.on("event", handler)),
         () => Effect.sync(() => GlobalBus.off("event", handler)),
@@ -73,8 +103,8 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       return { healthy: true as const, version: InstallationVersion }
     })
 
-    const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return yield* eventResponse()
+    const event = Effect.fn("GlobalHttpApi.event")(function* (ctx: { request: { url: string } }) {
+      return yield* eventResponse(ctx.request.url)
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
