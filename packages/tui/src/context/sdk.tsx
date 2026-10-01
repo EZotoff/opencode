@@ -88,9 +88,13 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         while (true) {
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
+          // opencode--event-scope-attach-congestion v2: declare the attach
+          // directory so the server drops other directories' high-volume
+          // message events per-connection (param-less = legacy firehose).
           const events = await sdk.global.event({
             signal: ctrl.signal,
             sseMaxRetryAttempts: 0,
+            ...(props.directory === undefined ? {} : { query: { directory: props.directory } }),
           })
 
           if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {

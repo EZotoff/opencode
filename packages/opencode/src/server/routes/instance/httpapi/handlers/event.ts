@@ -8,7 +8,7 @@ import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
-import { passesEventScope } from "./event-scope"
+import { eventSessionID, passesEventScope } from "./event-scope"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -46,7 +46,7 @@ function eventResponse(events: EventV2.Interface, scopeAll: boolean) {
       Stream.filter(
         (event) =>
           (event.location?.workspaceID === undefined || event.location.workspaceID === workspaceID) &&
-          passesEventScope(event.type, event.location?.directory, instance.directory, scopeAll),
+          passesEventScope(event.type, event.location?.directory, instance.directory, scopeAll, eventSessionID(event.data), undefined),
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
