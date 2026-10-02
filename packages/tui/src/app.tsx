@@ -35,6 +35,7 @@ import { useEvent } from "./context/event"
 import { SDKProvider, useSDK } from "./context/sdk"
 import { StartupLoading } from "./component/startup-loading"
 import { SyncProvider, useSync } from "./context/sync"
+import { shouldApplySessionEvent } from "./context/sync-guard"
 import { DataProvider } from "./context/data"
 import { LocationProvider } from "./context/location"
 import { LocalProvider, useLocal } from "./context/local"
@@ -1017,8 +1018,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }
   })
 
-  event.on("session.error", (evt, { workspace }) => {
+  event.on("session.error", (evt, { workspace, directory }) => {
     if (workspace !== project.workspace.current()) return
+    // opencode--tui-error-toast-directory-scope: workspace can be undefined on both
+    // sides (default TUI + projectID=global /tmp sessions), letting foreign probe
+    // errors through. Apply the same directory/session-scope rule as sync writes.
+    if (!shouldApplySessionEvent(sync.data, evt.properties.sessionID ?? "", directory, sdk.directory, kv)) return
     const error = evt.properties.error
     if (error && typeof error === "object" && error.name === "MessageAbortedError") return
     const message = errorMessage(error)
