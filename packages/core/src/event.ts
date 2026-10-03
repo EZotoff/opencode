@@ -6,6 +6,7 @@ import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
 import { and, asc, eq, gt, inArray } from "drizzle-orm"
 import { Database } from "./database/database"
 import { EventSequenceTable, EventTable } from "./event/sql"
+import { recordEventTypeBytes } from "./event/codec"
 import { Location } from "./location"
 import { makeGlobalNode } from "./effect/app-node"
 import { isDeepStrictEqual } from "node:util"
@@ -251,6 +252,13 @@ export const layerWith = (options?: LayerOptions) =>
                             string,
                             unknown
                           >
+                          // opencode--event-data-compression: per-type raw-byte accounting.
+                          // Stats failures must never kill the durable transaction.
+                          try {
+                            recordEventTypeBytes(versionedType(definition.type, durable.version), JSON.stringify(encoded).length)
+                          } catch {
+                            // observability only — swallow
+                          }
                           if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                             yield* Effect.die(
                               new InvalidDurableEventError({
