@@ -1836,7 +1836,7 @@ unix(
           arguments: "",
         })
 
-        expect(result.info.role).toBe("assistant")
+        expect(result?.info.role).toBe("assistant")
         const inputs = yield* llm.inputs
         expect(JSON.stringify(inputs.at(-1)?.messages)).toContain("configured")
       }),
