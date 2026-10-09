@@ -660,6 +660,7 @@ const layer = Layer.effect(
             const configured = Number(Bun.env.OPENCODE_STREAM_STALL_MS)
             const stall = Number.isFinite(configured) && configured > 0 ? configured : STREAM_STALL_DEFAULT_MS
             let lastEvent = yield* Clock.currentTimeMillis
+            const localTools = new Set<string>()
             const stream = llm.stream(streamInput)
             const watchdog = Effect.gen(function* () {
               while (true) {
@@ -671,12 +672,30 @@ const layer = Layer.effect(
                 yield* Effect.sleep(`${remaining} millis`)
               }
             })
+            const heartbeat = Effect.gen(function* () {
+              while (true) {
+                yield* Effect.sleep(`${stall / 2} millis`)
+                if (localTools.size > 0) {
+                  lastEvent = yield* Clock.currentTimeMillis
+                  yield* Effect.logWarning("stream-stall heartbeat: local tool execution in flight", {
+                    sessionID: input.sessionID,
+                    outstanding: localTools.size,
+                  })
+                }
+              }
+            })
 
             yield* Effect.raceFirst(
               stream.pipe(
                 Stream.tap((event) => {
                   return Clock.currentTimeMillis.pipe(
                     Effect.tap((now) => Effect.sync(() => (lastEvent = now))),
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        if (event.type === "tool-call" && !event.providerExecuted) localTools.add(event.id)
+                        else if (event.type === "tool-result" || event.type === "tool-error") localTools.delete(event.id)
+                      }),
+                    ),
                     Effect.andThen(handleEvent(event)),
                   )
                 }),
@@ -687,7 +706,7 @@ const layer = Layer.effect(
                   return Effect.sync(() => (streamSettled = true))
                 }),
               ),
-              watchdog,
+              Effect.raceFirst(watchdog, heartbeat),
             )
           }).pipe(
             Effect.onInterrupt(() =>
