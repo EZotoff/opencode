@@ -1,8 +1,32 @@
+diff --git a/node_modules/@opencode-ai/core/node_modules/@ai-sdk/openai-compatible/.bun-tag-fcbcf21a49377e8d b/.bun-tag-fcbcf21a49377e8d
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.js b/dist/index.js
-index dca128d3a790378c51a24a16d92585178343b278..da75f9d64acd2b607abd15079ce2d03b7a8d675a 100644
+index dca128d3a790378c51a24a16d92585178343b278..60a49712221ea02dfe4c42cfc441a9c8a8fa7844 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -696,7 +696,7 @@ var OpenAICompatibleChatLanguageModel = class {
+@@ -196,6 +196,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new import_provider.UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     (0, import_provider_utils.convertBase64ToUint8Array)(part.data)
+@@ -696,7 +710,7 @@ var OpenAICompatibleChatLanguageModel = class {
                finishReason = { unified: "error", raw: void 0 };
                controller.enqueue({
                  type: "error",
@@ -12,10 +36,31 @@ index dca128d3a790378c51a24a16d92585178343b278..da75f9d64acd2b607abd15079ce2d03b
                return;
              }
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..eaffc446f80552ea0b26573b89daa4dfc7776e6e 100644
+index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..1da9a1e9e77265a29dc7ea167ec9361a149db498 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -683,7 +683,7 @@ var OpenAICompatibleChatLanguageModel = class {
+@@ -181,6 +181,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new import_provider.UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     convertBase64ToUint8Array(part.data)
+@@ -683,7 +697,7 @@ var OpenAICompatibleChatLanguageModel = class {
                finishReason = { unified: "error", raw: void 0 };
                controller.enqueue({
                  type: "error",
@@ -24,6 +69,31 @@ index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..eaffc446f80552ea0b26573b89daa4df
                });
                return;
              }
+diff --git a/src/chat/convert-to-openai-compatible-chat-messages.ts b/src/chat/convert-to-openai-compatible-chat-messages.ts
+index dd8b7b7659c21de07f875cc23188ac7f7c8290a8..7c3170686e39e6479df180dbad382a37134d1aa3 100644
+--- a/src/chat/convert-to-openai-compatible-chat-messages.ts
++++ b/src/chat/convert-to-openai-compatible-chat-messages.ts
+@@ -117,6 +117,20 @@ export function convertToOpenAICompatibleChatMessages(
+                   };
+                 }
+ 
++                if (part.mediaType.startsWith('video/')) {
++                  if (part.data instanceof URL) {
++                    throw new UnsupportedFunctionalityError({
++                      functionality: 'video file parts with URLs',
++                    });
++                  }
++                  return {
++                    type: 'video_url',
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${convertToBase64(part.data)}`,
++                    },
++                    ...partMetadata,
++                  };
++                }
+                 if (part.mediaType.startsWith('text/')) {
+                   const textContent =
+                     part.data instanceof URL
 diff --git a/src/chat/openai-compatible-chat-language-model.ts b/src/chat/openai-compatible-chat-language-model.ts
 index 8c622db23c2d9a7373701f5a1b0c2ba109e24602..643c3db68a6043e097edc1122e0eb53fd13495c5 100644
 --- a/src/chat/openai-compatible-chat-language-model.ts
