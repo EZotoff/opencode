@@ -36,7 +36,7 @@ index dca128d3a790378c51a24a16d92585178343b278..60a49712221ea02dfe4c42cfc441a9c8
                return;
              }
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..1da9a1e9e77265a29dc7ea167ec9361a149db498 100644
+index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..e082639129ca240429f1c729e56199353db259d3 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -181,6 +181,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
@@ -52,7 +52,7 @@ index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..1da9a1e9e77265a29dc7ea167ec9361a
 +                  return {
 +                    type: "video_url",
 +                    video_url: {
-+                      url: `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                      url: `data:${part.mediaType};base64,${convertToBase64(part.data)}`
 +                    },
 +                    ...partMetadata
 +                  };
