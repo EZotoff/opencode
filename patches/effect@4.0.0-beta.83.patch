@@ -1,5 +1,25 @@
+diff --git a/dist/ScopedCache.js b/dist/ScopedCache.js
+index cf4b2c6..cfb7323 100644
+--- a/dist/ScopedCache.js
++++ b/dist/ScopedCache.js
+@@ -148,6 +148,15 @@ export const get = /*#__PURE__*/dual(2, (self, key) => effect.uninterruptibleMas
+     const ttl = self.timeToLive(exit, key);
+     if (Duration.isFinite(ttl)) {
+       entry.expiresAt = fiber.getRef(effect.ClockRef).currentTimeMillisUnsafe() + Duration.toMillis(ttl);
++    } else if (!effect.exitIsSuccess(exit)) {
++      // A failed or interrupted lookup must never be cached forever:
++      // with an infinite TTL the entry would never expire, so every
++      // future get for the key would replay the failure. Evict the
++      // entry so the next get re-runs the lookup.
++      const current = MutableHashMap.get(state.map, key);
++      if (Option.isSome(current) && current.value === entry) {
++        MutableHashMap.remove(state.map, key);
++      }
+     }
+     return effect.void;
+   }));
 diff --git a/dist/unstable/httpapi/HttpApiSchema.js b/dist/unstable/httpapi/HttpApiSchema.js
-index ecb6603d1ee4e89e92174b3a1100e8c9c720b3f3..08b832b6b3e9e4d10df156eca36b16f571f67f6e 100644
+index ecb6603..08b832b 100644
 --- a/dist/unstable/httpapi/HttpApiSchema.js
 +++ b/dist/unstable/httpapi/HttpApiSchema.js
 @@ -151,7 +151,7 @@ export const StreamSse = options => {
@@ -26,8 +46,28 @@ index ecb6603d1ee4e89e92174b3a1100e8c9c720b3f3..08b832b6b3e9e4d10df156eca36b16f5
  /**
   * Creates a streaming `Uint8Array` success response schema.
   *
+diff --git a/src/ScopedCache.ts b/src/ScopedCache.ts
+index 68a3959..9a9aedf 100644
+--- a/src/ScopedCache.ts
++++ b/src/ScopedCache.ts
+@@ -378,6 +378,15 @@ export const get: {
+             const ttl = self.timeToLive(exit, key)
+             if (Duration.isFinite(ttl)) {
+               entry.expiresAt = fiber.getRef(effect.ClockRef).currentTimeMillisUnsafe() + Duration.toMillis(ttl)
++            } else if (!effect.exitIsSuccess(exit)) {
++              // A failed or interrupted lookup must never be cached forever:
++              // with an infinite TTL the entry would never expire, so every
++              // future get for the key would replay the failure. Evict the
++              // entry so the next get re-runs the lookup.
++              const current = MutableHashMap.get(state.map, key)
++              if (Option.isSome(current) && current.value === entry) {
++                MutableHashMap.remove(state.map, key)
++              }
+             }
+             return effect.void
+           })
 diff --git a/src/unstable/httpapi/HttpApiSchema.ts b/src/unstable/httpapi/HttpApiSchema.ts
-index f2920365cf0328146523ce2e2dba04d6a8809a4a..5482d635cdf01a72063ff683d244fab891910211 100644
+index f292036..5482d63 100644
 --- a/src/unstable/httpapi/HttpApiSchema.ts
 +++ b/src/unstable/httpapi/HttpApiSchema.ts
 @@ -433,7 +433,7 @@ export const StreamSse: {

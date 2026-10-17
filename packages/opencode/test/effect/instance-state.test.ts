@@ -390,3 +390,32 @@ it.live("InstanceState survives deferred resume outside ALS when InstanceRef is 
     }).pipe(Effect.provide(Test.layer))
   }),
 )
+
+it.live("InstanceState recovers after an interrupted first lookup", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    let n = 0
+    const state = yield* InstanceState.make(() =>
+      Effect.gen(function* () {
+        n += 1
+        yield* Effect.sleep(Duration.millis(60))
+        return { n }
+      }),
+    )
+
+    // Abort the directory's very first lookup mid-flight (user Esc during
+    // lazy per-directory discovery).
+    const fiber = yield* access(state, dir).pipe(Effect.forkScoped)
+    yield* Effect.sleep(Duration.millis(10))
+    yield* Fiber.interrupt(fiber)
+
+    // The next get must re-run the lookup instead of replaying the
+    // interrupted exit forever (directory-instance poisoning).
+    const result = yield* access(state, dir).pipe(Effect.exit)
+    expect(Exit.isSuccess(result)).toBe(true)
+    if (Exit.isSuccess(result)) {
+      expect(result.value.n).toBe(2)
+      expect(n).toBe(2)
+    }
+  }),
+)
